@@ -1463,13 +1463,32 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
         page = self.open(ctx, "mobile")
         cdp = ctx.new_cdp_session(page)
         n = len(self.course.slides)
+        ids = self.course.ids()
         seen = set()
+        stuck = []   # screens where the phone pass could not move on by itself
+
+        def onward(sid, why):
+            """Stuck on `sid`: note it and open the next screen not tested yet, so one broken
+            screen does not end mobile testing for the rest of the course."""
+            stuck.append((sid, why))
+            start = ids.index(sid) + 1 if sid in ids else 0
+            for nid in ids[start:]:
+                if nid in seen:
+                    continue
+                if self.goto_slide(page, nid, tap=True) == nid:
+                    self.log(f"Mobile: moved on to {self.label(nid)} (could not go forward from {self.label(sid)})")
+                    return True
+            return False
+
         for _ in range(max(n * 2, 10)):
             self.check_time()
             st = self.state(page)
             sid = self.identify(st)
             if sid in seen:
-                break
+                nxt = [i for i in ids if i not in seen]
+                if not nxt or self.goto_slide(page, nxt[0], tap=True) != nxt[0]:
+                    break
+                continue
             seen.add(sid)
             self.current = sid
             lab = self.label(sid)
@@ -1480,7 +1499,8 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 # welcome screen moved on with START: nothing to swipe-test here
                 self.play_slide(page, sid)
                 if not self.advance(page, sid, tap=True):
-                    break
+                    if not onward(sid, "START did not open the next screen"):
+                        break
                 continue
             # 1. while Next is locked, swipe left must not move
             if st["nextExists"] and st["nextDisabled"]:
@@ -1516,13 +1536,16 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 if not self.advance(page, sid, tap=True):
                     if slide and slide.next_target and self.goto_slide(page, slide.next_target, tap=True) == slide.next_target:
                         continue
-                    break
+                    if not onward(sid, "the screen's own button did not open the next screen"):
+                        break
                 continue
             if st["nextDisabled"]:
                 if slide and slide.index < n and slide.next_target:
                     if self.goto_slide(page, slide.next_target, tap=True) == slide.next_target:
                         continue
-                break
+                if not onward(sid, "NEXT stayed locked after the screen finished"):
+                    break
+                continue
             # 3. Next enabled: swipe left must go forward
             new, st2 = self.touch_swipe(page, cdp, "left")
             if new == sid:
@@ -1538,7 +1561,9 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 # Next does not move on either (a branching or activity screen): not a swipe problem, carry on
                 if slide and slide.next_target and self.goto_slide(page, slide.next_target, tap=True) == slide.next_target:
                     continue
-                break
+                if not onward(sid, "NEXT did not open the next screen"):
+                    break
+                continue
             self.col.ran("swipe")
             # 4. on the new slide, swipe right must go back when Prev is enabled
             if st2["prevExists"] and not st2["prevDisabled"]:
@@ -1554,6 +1579,19 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                     if self.goto_slide(page, new, tap=True) != new:
                         self.click_first(page, SEL["next"])
                         self.settle(page)
+        # say plainly what the phone pass could not cover, instead of leaving the check blank
+        missed = [i for i in ids if i not in seen]
+        if missed:
+            self.col.add("swipe", "warning",
+                         f"Mobile testing could not reach {len(missed)} of {n} screens on the phone",
+                         detail="Not tested on mobile: " + ", ".join(self.label(i) for i in missed[:15])
+                                + (" …" if len(missed) > 15 else ""))
+        for sid, why in stuck:
+            self.col.add("swipe", "info", f"Mobile testing could not go forward from this screen: {why}",
+                         slide_id=sid, slide_label=self.label(sid),
+                         detail="The tester opened the next screen directly and carried on.")
+        if "swipe" not in self.col.checks_run and "swipe" not in self.col.checks_skipped:
+            self.col.skip("swipe", "No screen could be swipe-tested on the phone")
         ctx.close()
 
     def restrict_pass(self, browser):
