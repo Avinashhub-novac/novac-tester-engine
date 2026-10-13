@@ -228,6 +228,9 @@ class Run:
             for c in v.get("layer_shots", []):
                 if c.get("shot"):
                     shot_boxes[c["shot"]] = c.get("boxes") or {}
+            for c in v.get("text_shots", []):   # pictures taken as text appeared while the screen played
+                if c.get("shot"):
+                    shot_boxes[c["shot"]] = c.get("boxes") or {}
             if v.get("transcript_shot"):
                 shot_boxes[v["transcript_shot"]] = v.get("transcript_boxes") or {}
             tr_text = v.get("transcript_text") or s.notes

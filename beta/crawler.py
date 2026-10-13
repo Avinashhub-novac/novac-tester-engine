@@ -422,10 +422,22 @@ class Crawler:
             page.wait_for_timeout(800)
             self.seek_to_end(page)
         st = self.state(page)
+        seen_words, pending = set(), 0
         while time.time() - t0 < limit:
             self.check_time()
             st = self.state(page)
             if record is not None:
+                # text on many screens animates in and out (speech bubbles, callouts): take a picture each time
+                # new words appear, once they have settled, so language issues can be shown where they are visible
+                words = set(re.findall(r"[a-z0-9']{3,}", (st.get("text", "") + " " + st.get("acc", "")).lower()))
+                fresh = words - seen_words
+                if len(fresh) >= 3:
+                    seen_words |= fresh
+                    pending = 2
+                elif pending:
+                    pending -= 1
+                    if pending == 0:
+                        self._text_shot(page, sid, record)
                 for cap in st["captions"]:
                     if cap not in record["captions"]:
                         record["captions"].append(cap)
@@ -447,7 +459,18 @@ class Crawler:
             if not self.play_full and st["nextDisabled"] and elapsed > 2:
                 self.seek_to_end(page)
             page.wait_for_timeout(500)
+        if record is not None and pending:
+            self._text_shot(page, sid, record)
         return self.state(page)
+
+    def _text_shot(self, page, sid, record):
+        shots = record.setdefault("text_shots", [])
+        if len(shots) >= 25:
+            return
+        try:
+            shots.append({"shot": self.shot(page, f"{sid}_txt{len(shots)}"), "boxes": page.evaluate(TEXTBOX_JS)})
+        except Exception:
+            pass
 
     def seek_to_end(self, page):
         for q in SEL["seekbar"]:
@@ -1238,14 +1261,149 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             else:
                 self.col.ran("navigation")
 
+    # ---- custom menu: a "Menu" button designed into the screens, opening a list of topics
+    MENU_WORD = re.compile(r"^\s*(menu|course menu|main menu|contents|table of contents|toc|index)\s*$", re.I)
+    CLOSE_WORD = re.compile(r"^\s*(close|close menu|x|×|✕|✖|back|return|resume)\s*$", re.I)
+
+    @staticmethod
+    def _obox(o):
+        return [o["x"] - o["w"] / 2, o["y"] - o["h"] / 2, o["w"], o["h"]]
+
+    def _clickables(self, page):
+        try:
+            return page.evaluate(CLICKABLES_JS, SEL)
+        except Exception:
+            return []
+
+    def _custom_menu_button(self, page):
+        return next((o for o in self._clickables(page) if self.MENU_WORD.match(o.get("label") or "")), None)
+
+    def open_custom_menu(self, page):
+        """Clicks the screen's Menu button. Returns {"button", "items", "close"} or None if there is no Menu button."""
+        btn = self._custom_menu_button(page)
+        if not btn:
+            return None
+        key = lambda o: (round(o["x"] / 6), round(o["y"] / 6), (o.get("label") or "").lower())
+        before = {key(o) for o in self._clickables(page)}
+        self.click_box(page, self._obox(btn))
+        page.wait_for_timeout(1300)
+        new = [o for o in self._clickables(page) if key(o) not in before]
+        close = next((o for o in new if self.CLOSE_WORD.match(o.get("label") or "")), None)
+        items = [o for o in new if o is not close and not self.MENU_WORD.match(o.get("label") or "")
+                 and (o.get("label") or "").strip()]
+        return {"button": btn, "items": items, "close": close}
+
+    def _find_custom_menu(self, page):
+        """Moves through the first screens until one shows a Menu button. True if found."""
+        ids = self.course.ids()
+        for k in range(min(5, len(ids))):
+            if self._custom_menu_button(page):
+                return True
+            if k + 1 < len(ids) and self.jump(page, ids[k + 1]) != ids[k + 1]:
+                if not self.advance(page, self.identify(self.state(page))):
+                    break
+            self.settle_timeline(page)
+        return bool(self._custom_menu_button(page))
+
+    def custom_menu_pass(self, page):
+        if not self._find_custom_menu(page):
+            self.col.skip("menu", "No course menu found: the player has no menu and no screen shows a Menu button")
+            return
+        home = self.identify(self.state(page))
+        opened = self.open_custom_menu(page)
+        shot = self.shot(page, f"{home}_custom_menu")
+        btn_box = self._obox(opened["button"])
+        if not opened["items"]:
+            self.col.add("menu", "error", "Menu button does not open the menu", slide_id=home, slide_label=self.label(home),
+                         screenshot=shot, box=btn_box, vw=1366)
+            self.col.ran("menu")
+            return
+        self.log(f"Menu: course menu button found on {self.label(home)} with {len(opened['items'])} items")
+        items = [{"i": k, "text": o["label"]} for k, o in enumerate(opened["items"])]
+        mapping = self.build_menu_map(items)
+        for it, o in zip(items, opened["items"]):
+            if it["i"] not in mapping:
+                self.col.add("menu", "warning", "Menu item does not match any screen title", slide_id=home,
+                             slide_label=self.label(home), detail=it["text"], screenshot=shot, box=self._obox(o), vw=1366)
+        listed = set(mapping.values())
+        if len(listed) >= 0.5 * max(1, len(self.course.slides)):
+            for s in self.course.slides:
+                if s.id not in listed and not is_welcome(s):
+                    self.col.add("menu", "info", "Screen is not listed in the menu", slide_id=s.id, slide_label=s.label)
+        # the close button must close the menu
+        if opened["close"]:
+            self.click_box(page, self._obox(opened["close"]))
+            page.wait_for_timeout(900)
+            labels = {(o.get("label") or "") for o in self._clickables(page)}
+            if sum(1 for it in items if it["text"] in labels) >= max(1, len(items) // 2):
+                self.col.add("menu", "error", "Close button does not close the menu", slide_id=home,
+                             slide_label=self.label(home), screenshot=self.shot(page, f"{home}_menu_close"),
+                             box=self._obox(opened["close"]), vw=1366)
+        else:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(500)
+        # every item must open its own screen
+        expect = (self.expect or {}).get("menu")
+        locked, moved = [], 0
+        for idx, sid in sorted(mapping.items()):
+            self.check_time()
+            self.current = sid
+            text = items[idx]["text"]
+            here = self.identify(self.state(page))
+            o = next((x for x in self._clickables(page) if (x.get("label") or "") == text), None)
+            if not o:
+                again = self.open_custom_menu(page)
+                if not again:
+                    if self.goto_slide(page, home) == home:
+                        again = self.open_custom_menu(page)
+                if not again:
+                    self.col.add("menu", "warning", "Menu button is not available on this screen", slide_id=here,
+                                 slide_label=self.label(here), screenshot=self.shot(page, f"{here}_no_menu"), vw=1366)
+                    break
+                o = next((x for x in again["items"] if (x.get("label") or "") == text), None)
+                if not o:
+                    continue
+            before = self._sig(self.state(page))
+            self.click_box(page, self._obox(o))
+            st = self.settle(page)
+            got = self.identify(st, expected=sid if self._moved(before, self._sig(st)) else None)
+            self.log(f"Menu: “{text}” -> {self.label(got)}")
+            self.tick("menu", idx + 1, max(1, len(mapping)))
+            if got == sid:
+                moved += 1
+                if sid not in self.visits:
+                    self.visits[sid] = {"captions": list(st["captions"]), "seek": [], "media_requests": set(),
+                                        "shot": self.shot(page, f"{sid}_menu"), "seek_visible": st["seekVisible"],
+                                        "text": st["text"], "title": st["title"], "via_menu": True,
+                                        "vw": 1366, "seek_box": st.get("seekBox"), "boxes": page.evaluate(TEXTBOX_JS)}
+            elif got in (here, None) or (got or "").startswith("unknown"):
+                locked.append((sid, text, here))
+            else:
+                self.col.add("menu", "error", "Menu item opened the wrong screen", slide_id=sid, slide_label=self.label(sid),
+                             detail=f"Menu item “{text}” opened {self.label(got)}", screenshot=self.shot(page, f"{sid}_menu"), vw=1366)
+        for sid, text, here in locked:
+            if expect == "free":
+                self.col.add("menu", "error", "Menu item does not open its screen", slide_id=sid, slide_label=self.label(sid),
+                             detail=f"Clicked “{text}” in the menu on {self.label(here)}; nothing opened")
+            else:
+                self.col.add("menu", "info", "Menu item did not open (menu is locked until the screen is visited)",
+                             slide_id=sid, slide_label=self.label(sid), detail=f"“{text}”")
+        if moved == 0 and not locked:
+            self.col.add("menu", "warning", "No menu item could be tested", slide_id=home, slide_label=self.label(home),
+                         screenshot=shot, vw=1366)
+        self.col.ran("menu")
+
     def menu_pass(self, browser):
         ctx = browser.new_context(viewport={"width": 1366, "height": 768}, device_scale_factor=2)
         page = self.open(ctx, "menu")
         items = self.ensure_menu(page)
         self.has_menu = bool(items)
         if not items:
-            self.col.skip("menu", "This player has no course menu")
-            ctx.close()
+            # no player menu: the course may have its own Menu button on the screens
+            try:
+                self.custom_menu_pass(page)
+            finally:
+                ctx.close()
             return
         self.menu_map = self.build_menu_map(items)
         by_ref = any(it.get("ref") for it in items)
@@ -1594,6 +1752,33 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             self.col.skip("swipe", "No screen could be swipe-tested on the phone")
         ctx.close()
 
+    def _custom_menu_restriction(self, page):
+        """Fresh session: open the screen's own Menu and click a screen not visited yet."""
+        ids = self.course.ids()
+        if not self._find_custom_menu(page):
+            return None
+        here = self.identify(self.state(page))
+        opened = self.open_custom_menu(page)
+        if not opened or not opened["items"]:
+            return {"found": None, "note": "The Menu button did not open a menu"}
+        items = [{"i": k, "text": o["label"]} for k, o in enumerate(opened["items"])]
+        mapping = self.build_menu_map(items)
+        later = [(i, sid) for i, sid in sorted(mapping.items())
+                 if sid in ids and here in ids and ids.index(sid) > ids.index(here) + 1]
+        if not later:
+            return {"found": None, "note": "Too few menu items after this screen to test"}
+        idx, target = later[min(1, len(later) - 1)]
+        o = opened["items"][idx]
+        shot = self.shot(page, "restrict_menu")
+        before = self._sig(self.state(page))
+        self.click_box(page, self._obox(o))
+        st = self.settle(page)
+        got = self.identify(st, expected=target if self._moved(before, self._sig(st)) else None)
+        moved = got not in (here, None) and not (got or "").startswith("unknown")
+        return {"found": "free" if moved else "restricted", "shot": shot, "box": self._obox(o),
+                "note": f"Clicked “{o['label']}” in the course's Menu before visiting it: "
+                        + (f"it opened {self.label(got)}." if moved else "it did not open.")}
+
     def restrict_pass(self, browser):
         """Beta: are menu, seekbar and Next restricted the way the RCD says?"""
         exp = {k: v for k, v in (self.expect or {}).items() if v in ("restricted", "free")}
@@ -1610,7 +1795,9 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             mm = self.build_menu_map(items) if items else {}
             start = self.identify(self.state(page), expected=ids[0] if ids else None)
             later = [(i, sid) for i, sid in sorted(mm.items()) if sid in ids and start in ids and ids.index(sid) > ids.index(start) + 1]
-            if not later:
+            if not items:
+                obs["menu"] = self._custom_menu_restriction(page) or {"found": None, "note": "No course menu found"}
+            elif not later:
                 obs["menu"] = {"found": None, "note": "No course menu, or too few menu items to test"}
             else:
                 idx, target = later[min(1, len(later) - 1)]
