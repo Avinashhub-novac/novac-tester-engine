@@ -1,0 +1,682 @@
+"""Command-line entry used when Claude itself runs the tests in the background.
+
+    python3 -m beta.cli run      --work W --id ID --upload FILE --kind scorm|video [--captions F] [--options JSON] [--glossary TXT] [--name N]
+    python3 -m beta.cli merge    --work W --id ID --answers claude_answers.json
+    python3 -m beta.cli bundle   --work W --id ID
+    python3 -m beta.cli report   --work W --id ID
+    python3 -m beta.cli finalize --work W --id ID --map shots_map.json
+
+`run` does every browser/audio check and writes claude_tasks.json with the text Claude must
+review (proofreading, captions vs. narration script). `merge` folds Claude's answers back
+into results.json. `bundle` shrinks screenshots to JPEG for upload, and `finalize` swaps
+local screenshot names for the uploaded asset ids.
+"""
+import argparse
+import re
+import functools
+import json
+import os
+import shutil
+import socket
+import sys
+import threading
+import time
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+
+def _free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+class _Quiet(SimpleHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+
+def cmd_run(a):
+    work = Path(a.work).resolve()
+    port = _free_port()
+    os.environ.update(DATA_DIR=str(work), PORT=str(port), LANGUAGE_MODE="export")
+    from beta import config, runner  # noqa: imported after env is set
+    run_dir = config.RUNS_DIR / a.id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    up = Path(a.upload)
+    dest = run_dir / up.name
+    if up.resolve() != dest.resolve():
+        shutil.copy(up, dest)
+    cap = ""
+    if a.captions:
+        cap = "captions" + Path(a.captions).suffix.lower()
+        shutil.copy(a.captions, run_dir / cap)
+    sb = ""
+    if a.sb:
+        sb = "storyboard" + Path(a.sb).suffix.lower()
+        shutil.copy(a.sb, run_dir / sb)
+    meta = {"id": a.id, "kind": a.kind, "name": a.name or up.name, "file": up.name, "captions": cap, "storyboard": sb,
+            "created": time.time(), "status": "queued", "glossary": a.glossary or "",
+            "options": json.loads(a.options or "{}")}
+    (run_dir / "run.json").write_text(json.dumps(meta, indent=1))
+    srv = ThreadingHTTPServer(("127.0.0.1", port), functools.partial(_Quiet, directory=str(work)))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        runner.execute(run_dir)
+    finally:
+        srv.shutdown()
+    m = json.loads((run_dir / "run.json").read_text())
+    tasks = run_dir / "claude_tasks.json"
+    print(json.dumps({"status": m["status"], "error": m.get("error", ""), "totals": m.get("totals"),
+                      "claude_tasks": str(tasks) if tasks.exists() else None}, indent=1))
+    return 0 if m["status"] == "done" else 1
+
+
+def _paths(a):
+    work = Path(a.work).resolve()
+    run_dir = work / "runs" / a.id
+    return run_dir, json.loads((run_dir / "results.json").read_text())
+
+
+def _save(run_dir, res):
+    from beta.runner import summarize
+    res["summary"] = summarize(res["findings"], set(res.get("checks_run", [])), res.get("checks_skipped", {}))
+    (run_dir / "results.json").write_text(json.dumps(res, indent=1, ensure_ascii=False))
+
+
+def _shot_for(slide, text):
+    """The caption frame that shows `text`, else the slide's own screenshot."""
+    want = " ".join((text or "").lower().split())[:60]
+    for c in slide.get("cap_shots") or []:
+        if want and want in " ".join(c["text"].lower().split()):
+            return c["shot"]
+    return slide.get("shot", "")
+
+
+def cmd_merge(a):
+    os.environ.setdefault("DATA_DIR", a.work)
+    run_dir, res = _paths(a)
+    tasks = json.loads((run_dir / "claude_tasks.json").read_text())
+    ans = json.loads(Path(a.answers).read_text())
+    added = 0
+
+    def item(kind, iid):
+        return next((t for t in tasks.get(kind, []) if str(t["id"]) == str(iid)), None)
+
+    def add(**f):
+        nonlocal added
+        base = {"check": "", "severity": "warning", "message": "", "slide_id": "", "slide_label": "", "detail": "",
+                "suggestion": "", "screenshot": "", "time": ""}
+        base.update(f)
+        res["findings"].append(base)
+        added += 1
+
+    from beta.runner import issue_to_finding
+    for iss in ans.get("proofread", []):
+        it = item("proofread", iss.get("item_id")) or {}
+        add(**issue_to_finding(iss, it))
+    for v in ans.get("script_compare", []):
+        it = item("script_compare", v.get("item_id")) or {}
+        if v.get("verdict") in ("mismatch", "minor_differences"):
+            add(check="transcript", severity="error" if v["verdict"] == "mismatch" else "warning",
+                message="Closed captions differ from the transcript",
+                slide_id=it.get("slide_id", ""), slide_label=it.get("label", ""), screenshot=it.get("shot", ""),
+                locate=" ".join((it.get("script") or "").split()[:6]),
+                detail="\n".join(v.get("differences") or []))
+    for v in ans.get("sb_compare", []):
+        sid = v.get("slide_id") or ""
+        sl = next((x for x in tasks.get("sb_compare", {}).get("slides", []) if x["id"] == sid), {})
+        details = []
+        if v.get("sb_says"):
+            details.append(f"SB: “{v['sb_says']}”")
+        if v.get("course_says"):
+            details.append(f"Course: “{v['course_says']}”")
+        if v.get("explanation"):
+            details.append(v["explanation"])
+        add(check="content", severity=v.get("severity") if v.get("severity") in ("error", "warning") else "error",
+            message=f"Not as per SB – {v.get('issue', 'content differs')}", slide_id=sid,
+            slide_label=sl.get("label", v.get("time", "")), time=v.get("time", ""), detail="\n".join(details),
+            suggestion=v.get("sb_says", "") if v.get("found_in") in ("OST", "Slide Title") else "",
+            found_in=v.get("found_in", "Content Flow"), locate=(v.get("course_says") or "")[:80],
+            sb_says=v.get("sb_says", ""), sb_page=v.get("sb_page") or "",
+            screenshot=_shot_for(sl, v.get("course_says", "")))
+    slide_label = lambda sid: next((x.get("label") for x in res.get("slides", []) if x.get("id") == sid), "")
+    for kind, check in (("logic_check", "logic"), ("assessment_review", "assessment")):
+        for v in ans.get(kind, []):
+            sid = v.get("slide_id") or ""
+            details = [f"“{v['quote']}”"] if v.get("quote") else []
+            if v.get("explanation"):
+                details.append(v["explanation"])
+            add(check=check, severity=v.get("severity") if v.get("severity") in ("error", "warning") else "warning",
+                message=v.get("issue", "Check this"), slide_id=sid, slide_label=slide_label(sid), detail="\n".join(details),
+                suggestion=v.get("suggestion", ""), locate=(v.get("quote") or "")[:80],
+                screenshot=next((x.get("shot", "") for x in res.get("slides", []) if x.get("id") == sid), ""))
+    rules = {r["rule"]: r["text"] for r in (tasks.get("sb_review") or {}).get("rules", [])}
+    from beta.sbreview import RULE_GROUP, FOUND_IN
+    for v in ans.get("sb_review", []):
+        try:
+            rule = int(v.get("rule") or 1)
+        except (TypeError, ValueError):
+            rule = 1
+        page = int(v.get("page") or 0) or None
+        details = []
+        if v.get("quote"):
+            details.append(f"“{v['quote']}”")
+        if v.get("explanation"):
+            details.append(v["explanation"])
+        add(check=RULE_GROUP.get(rule, "sb_language"), severity=v.get("severity") if v.get("severity") in ("error", "warning") else "warning",
+            message=f"SB: {v.get('issue', 'issue')}", slide_id=f"p{page}" if page else "", slide_label=f"Page {page}" if page else "",
+            detail="\n".join(details), suggestion=v.get("suggestion", ""), sb_says=v.get("quote", ""), sb_page=page or 0,
+            rule=rules.get(rule, ""), found_in=FOUND_IN.get(v.get("found_in"), v.get("found_in") or "SB-OST"),
+            sb_screen=str(v.get("screen") or ""), screen_title=v.get("screen_title", ""))
+    for v in ans.get("transcript_review", []):
+        it = item("transcript_review", v.get("item_id")) or {}
+        if v.get("verdict") in ("mismatch", "minor_differences"):
+            add(check="transcript", severity="error" if v["verdict"] == "mismatch" else "warning",
+                message=f"Captions differ from narration ({it.get('score', 0) * 100:.0f}% word match)",
+                slide_id=it.get("slide_id", ""), slide_label=it.get("label", ""), time=it.get("time", ""),
+                detail="\n".join(v.get("differences") or it.get("diffs") or []))
+    _save(run_dir, res)
+    print(f"merged {added} findings")
+
+
+def _norm_word(w):
+    return re.sub(r"[^\w']+", "", w.lower())
+
+
+def _find_text_box(tb, needle):
+    """Tight box around `needle` (one or more words) on the slide; falls back to the text block."""
+    if isinstance(tb, list):  # older format: blocks only
+        tb = {"nodes": tb, "words": []}
+    want = [_norm_word(w) for w in (needle or "").split() if _norm_word(w)]
+    if not want:
+        return None
+    words = tb.get("words", [])
+    for i in range(len(words) - len(want) + 1):
+        seq = words[i:i + len(want)]
+        if [_norm_word(x["w"]) for x in seq] == want:
+            xs = [x["b"] for x in seq]
+            x0, y0 = min(b[0] for b in xs), min(b[1] for b in xs)
+            x1, y1 = max(b[0] + b[2] for b in xs), max(b[1] + b[3] for b in xs)
+            return [x0, y0, x1 - x0, y1 - y0]
+    flat = " ".join(want)
+    hits = [b for b in tb.get("nodes", []) if flat in " ".join(_norm_word(w) for w in b["t"].split())]
+    return min(hits, key=lambda b: b["b"][2] * b["b"][3])["b"] if hits else None
+
+
+def _locate(f, slide, shot_boxes=None, src_rel=""):
+    """Best guess at where on the screenshot a finding is, in CSS pixels."""
+    if f.get("box"):
+        return f["box"]
+    # text positions recorded with this exact screenshot (caption frames, transcript panel) win over the slide's
+    tb = (shot_boxes or {}).get(src_rel) or ((slide or {}).get("boxes") or {})
+    needle = f.get("locate")
+    if not needle and f["check"] == "buttons" and f.get("detail"):
+        needle = f["detail"].split("\n")[0]
+    if not needle and f["check"] in ("grammar", "spelling", "transcript"):
+        m = re.search(r"“(.+?)”", f["message"])
+        needle = m.group(1) if m else None
+    if needle:
+        return _find_text_box(tb, needle)
+    if not slide:
+        return None
+    if f["check"] == "screen_number":
+        from beta.textcheck import find_screen_number
+        nodes = tb if isinstance(tb, list) else tb.get("nodes", [])
+        for b in nodes:
+            hit = find_screen_number(b["t"])
+            if hit:
+                return _find_text_box(tb, hit[2]) or b["b"]
+    return None
+
+
+def _font(size, bold=True):
+    from PIL import ImageFont
+    for name in (("DejaVuSans-Bold.ttf",) if bold else ()) + ("DejaVuSans.ttf",):
+        try:
+            return ImageFont.truetype(f"/usr/share/fonts/truetype/dejavu/{name}", size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _render(src, out, box, vw, tag="", mark=True, more=None):
+    """Saves a sharp JPEG with the issue marked: a red outline (on the spot, or around the whole screen) and a label.
+    `more` = further boxes of the same issue on this screen (e.g. several buttons that do nothing)."""
+    from PIL import Image, ImageDraw
+    im = Image.open(src).convert("RGB")
+    k = im.width / vw if vw else 1.0
+    red = (225, 29, 29)
+    d = ImageDraw.Draw(im)
+    width = max(3, round(2.5 * k))
+    if mark and box:
+        for bx in more or []:
+            if bx and bx != box:
+                x, y, w, h = [v * k for v in bx]
+                d.rounded_rectangle([max(2, x - 4 * k), max(2, y - 4 * k), min(im.width - 3, x + w + 4 * k),
+                                     min(im.height - 3, y + h + 4 * k)], radius=round(6 * k), outline=red, width=width)
+    if not mark:
+        box, tag = None, ""
+    if not mark:
+        pass
+    elif box:
+        x, y, w, h = [v * k for v in box]
+        pad = 4 * k
+        x0, y0 = max(2, x - pad), max(2, y - pad)
+        x1, y1 = min(im.width - 3, x + w + pad), min(im.height - 3, y + h + pad)
+    else:  # no single spot: outline the whole screen so it is clear the issue is about this screen
+        inset = max(4, round(3 * k))
+        x0, y0, x1, y1 = inset, inset, im.width - inset - 1, im.height - inset - 1
+    if mark:
+        d.rounded_rectangle([x0, y0, x1, y1], radius=round(6 * k), outline=red, width=width)
+    if mark and tag:
+        f = _font(max(14, round(14 * k)))
+        tw = d.textlength(tag, font=f)
+        th = f.size * 1.25
+        padx, pady = 8 * k / 1.2, 4 * k / 1.2
+        lw, lh = tw + 2 * padx, th + 2 * pady
+        lx = min(max(2, x0), im.width - lw - 2)
+        if not box:  # whole-screen outline: label centred at the top
+            lx = (im.width - lw) / 2
+        ly = y0 - lh - 2 if box and y0 - lh - 2 > 0 else (y1 + 2 if box and y1 + lh + 2 < im.height else y0 + width + 2)
+        if box and x1 + 8 + lw < im.width - 2:   # beside the outline keeps the nearby text readable
+            lx, ly = x1 + 8, max(2, min((y0 + y1 - lh) / 2, im.height - lh - 2))
+        d.rounded_rectangle([lx, ly, lx + lw, ly + lh], radius=round(4 * k), fill=red)
+        d.text((lx + padx, ly + pady), tag, font=f, fill=(255, 255, 255))
+    if im.width > 1800:
+        im = im.resize((1800, round(im.height * 1800 / im.width)), Image.LANCZOS)
+    im.save(out, "JPEG", quality=90, optimize=True, progressive=True)
+
+
+def _placeholder(out, label):
+    """A clearly marked card used only when the tester could not open a screen at all."""
+    from PIL import Image, ImageDraw
+    im = Image.new("RGB", (1366, 768), (245, 246, 248))
+    d = ImageDraw.Draw(im)
+    d.rounded_rectangle([12, 12, 1353, 755], radius=14, outline=(225, 29, 29), width=5)
+    d.text((70, 300), f"No screenshot: {label}"[:70], font=_font(40), fill=(30, 30, 30))
+    d.text((70, 370), "The tester could not open this screen. Please check it by hand.", font=_font(28, bold=False), fill=(80, 80, 80))
+    im.save(out, "JPEG", quality=90)
+
+
+def _sb_evidence(run_dir, words, f, out_rel, tag=""):
+    """Picture of the storyboard page with the SB wording the issue quotes outlined in red."""
+    from PIL import Image
+    from beta.storyboard import find_on_pages
+    quote = f.get("sb_says") or ""
+    page, box, score = find_on_pages(words, quote, f.get("sb_page") or None)
+    if not page:
+        return None
+    src = run_dir / "sb" / f"page{page}.png"
+    if not src.exists():
+        return None
+    im = Image.open(src).convert("RGB")
+    portrait = im.height > im.width * 1.1
+    if box and portrait:   # a band of the page around the quoted text, wide enough to read the screen's table
+        top = max(0, int(box[1] - 300))
+        bottom = min(im.height, int(box[1] + box[3] + 300))
+        im = im.crop((0, top, im.width, bottom))
+        box = [box[0], box[1] - top, box[2], box[3]]
+    tmp = run_dir / (out_rel + ".png")
+    im.save(tmp)
+    _render(tmp, run_dir / out_rel, box, im.width, (tag or f"SB page {page}") if box else "", mark=bool(box))
+    tmp.unlink()
+    if not box:   # no exact spot: put the page number on the picture so it can be found
+        im2 = Image.open(run_dir / out_rel)
+        from PIL import ImageDraw
+        d = ImageDraw.Draw(im2)
+        d.rounded_rectangle([8, 8, 220, 52], radius=6, fill=(225, 29, 29))
+        d.text((20, 14), f"SB page {page}", font=_font(26), fill=(255, 255, 255))
+        im2.save(run_dir / out_rel, "JPEG", quality=90)
+    return out_rel
+
+
+def _side_by_side(a, b, out, cap_a, cap_b):
+    """Course screen and SB page next to each other, each with a caption (used in the Excel report)."""
+    from PIL import Image, ImageDraw
+    A, B = Image.open(a).convert("RGB"), Image.open(b).convert("RGB")
+    W = 1100
+    A = A.resize((W, round(A.height * W / A.width)))
+    B = B.resize((W, round(B.height * W / B.width)))
+    cap = 52
+    H = max(A.height, B.height) + cap
+    im = Image.new("RGB", (W * 2 + 24, H), (255, 255, 255))
+    d = ImageDraw.Draw(im)
+    for x, img, text, col in ((0, A, cap_a, (31, 78, 121)), (W + 24, B, cap_b, (120, 63, 4))):
+        d.rectangle([x, 0, x + W, cap - 8], fill=col)
+        d.text((x + 14, 8), text[:70], font=_font(30), fill=(255, 255, 255))
+        im.paste(img, (x, cap))
+    im.save(out, "JPEG", quality=88, optimize=True)
+
+
+def _needle(f):
+    if f.get("locate"):
+        return f["locate"]
+    if f.get("check") in ("grammar", "spelling", "transcript"):
+        m = re.search(r"“(.+?)”", f.get("message", ""))
+        return m.group(1) if m else None
+    return None
+
+
+def _nice_label(label):
+    """Image file names are what Storyline uses when a picture has no alt text: say "picture" instead."""
+    if re.search(r"\.(png|jpe?g|gif|svg)$", label or "", re.I) or re.match(r"^Asset \d+", label or ""):
+        return "picture"
+    return label
+
+
+def _group(findings, slides):
+    """Report each problem once.
+    1. Same problem several times on one screen (e.g. three buttons that do nothing) -> one row, all spots outlined.
+    2. Same problem on three or more screens (e.g. the seekbar shown on every screen) -> one row naming the screens."""
+    order = {s["id"]: s.get("index", 0) for s in slides.values()} if isinstance(slides, dict) else {}
+    # 0. the same button on many screens (usually a button on the master slide): one row for it
+    by_label = {}
+    for f in findings:
+        if f.get("check") == "buttons" and f.get("slide_id") and (f.get("detail") or "").strip():
+            by_label.setdefault((f["detail"].split("\n")[0], f.get("message"), f.get("mobile")), []).append(f)
+    drop = set()
+    for (label, msg, mob), group in by_label.items():
+        if len({g["slide_id"] for g in group}) >= 3:
+            group.sort(key=lambda f: order.get(f.get("slide_id"), 0))
+            first = group[0]
+            first["detail"] = (label + f"\nSame button on {len(group)} screens: "
+                               + ", ".join((g.get("slide_label") or g["slide_id"]) for g in group[:30])).strip()
+            first["message"] = f"“{_nice_label(label)}” button not working (on every screen it appears)"
+            first["tag"] = "Button not working"
+            first["_lab"] = True
+            drop.update(id(g) for g in group[1:])
+    findings = [f for f in findings if id(f) not in drop]
+    out, per = [], {}
+    for f in findings:
+        if f.pop("_lab", False):
+            out.append(f)
+            continue
+        key = (f.get("check"), f.get("slide_id"), f.get("message"), f.get("mobile"))
+        g = per.get(key)
+        if g is None or not f.get("slide_id"):
+            per[key] = f
+            f["_n"] = 1
+            out.append(f)
+            continue
+        g["_n"] += 1
+        if f.get("box"):
+            g.setdefault("boxes", [g["box"]] if g.get("box") else []).append(f["box"])
+            if not g.get("box"):
+                g.update(box=f["box"], screenshot=f.get("screenshot") or g.get("screenshot"), vw=f.get("vw") or g.get("vw"))
+        d = (f.get("detail") or "").split("\n")[0]
+        if d and d not in (g.get("detail") or ""):
+            g["detail"] = ((g.get("detail") or "") + "\n" + d).strip()
+        if f.get("severity") == "error":
+            g["severity"] = "error"
+    for g in out:
+        n = g.pop("_n", 1)
+        if n > 1 and g.get("check") == "buttons":
+            g["message"] = f"{n} buttons not working on this screen (nothing happens on click)"
+            g["tag"] = "Buttons not working"
+        elif n > 1:
+            g["message"] = f"{g['message']} ({n} places on this screen)"
+    # the same problem across many screens
+    across, final = {}, []
+    for f in out:
+        if not f.get("slide_id") or f.get("check") == "content" or f.get("check", "").startswith("sb_"):
+            final.append(f)
+            continue
+        key = (f.get("check"), f.get("message"), f.get("mobile"), (f.get("detail") or "").split("\n")[0] if f.get("check") != "buttons" else "")
+        across.setdefault(key, []).append(f)
+    for key, group in across.items():
+        need = 2 if key[0] in ("grammar", "spelling", "transcript") else 3   # the same mistake in the same words
+        if len(group) < need or key[0] == "buttons":
+            final.extend(group)
+            continue
+        group.sort(key=lambda f: order.get(f.get("slide_id"), 0))
+        first = group[0]
+        labels = [g.get("slide_label") or g.get("slide_id") for g in group]
+        first["detail"] = ((first.get("detail") or "") + f"\nSame problem on {len(group)} screens: " + ", ".join(labels[:30])
+                           + ("…" if len(labels) > 30 else "")).strip()
+        first["screens"] = [g.get("slide_id") for g in group]
+        final.append(first)
+    # keep the original order of the report
+    pos = {id(f): i for i, f in enumerate(findings)}
+    final.sort(key=lambda f: pos.get(id(f), 0))
+    return final
+
+
+def cmd_bundle(a):
+    _phase(a, "report")
+    run_dir, res = _paths(a)
+    out = run_dir / "bundle"
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir()
+    slides = {s["id"]: s for s in res.get("slides", [])}
+    plain = {}
+
+    def plain_copy(rel, vw):
+        if rel not in plain:
+            src = run_dir / rel
+            if not src.exists():
+                return ""
+            name = "bundle/" + Path(rel).stem + ".jpg"
+            _render(src, run_dir / name, None, vw, mark=False)
+            plain[rel] = name
+        return plain[rel]
+
+    for s in slides.values():
+        if s.get("shot"):
+            s["shot"] = plain_copy(s["shot"], s.get("vw"))
+    comp = res.get("completion") or {}
+    for k in ("panel_shot", "final_shot"):
+        if comp.get(k):
+            comp[k] = plain_copy(comp[k], 1366)
+    from beta import wording
+    wording.apply(res["findings"])
+    # one row per problem: the same message on the same screen about the same thing is reported once
+    seen, kept = {}, []
+    for f in res["findings"]:
+        key = (f.get("check"), f.get("slide_id"), f.get("message"), (f.get("detail") or "").split("\n")[0], f.get("mobile"))
+        if key in seen:
+            g = seen[key]
+            if not g.get("box") and f.get("box"):
+                g.update(box=f["box"], screenshot=f.get("screenshot") or g.get("screenshot"), vw=f.get("vw") or g.get("vw"))
+            if f.get("severity") == "error":
+                g["severity"] = "error"
+            continue
+        seen[key] = f
+        kept.append(f)
+    res["findings"] = _group(kept, slides)
+    shot_boxes = res.get("shot_boxes") or {}
+    ids = sorted(slides, key=len, reverse=True)
+
+    def owner(rel):
+        """Which slide a screenshot shows (screenshots are named <slide id>_…)."""
+        stem = Path(rel or "").stem
+        return next((sid for sid in ids if stem.startswith(sid + "_")), None)
+
+    # STRICT: an issue about a screen only ever shows that screen. Never another screen's picture.
+    course_wide = next((s["shot"] for s in res.get("slides", []) if s.get("shot")), "") or comp.get("final_shot", "")
+    sb_dir = run_dir / "sb"
+    sb_words = json.loads((sb_dir / "words.json").read_text()) if (sb_dir / "words.json").exists() else None
+    xl_dir = run_dir / "bundle_xl"
+    shutil.rmtree(xl_dir, ignore_errors=True)
+    xl_dir.mkdir()
+    for i, f in enumerate(res["findings"]):
+        sid = f.get("slide_id") or ""
+        slide = slides.get(sid)
+        src_rel = f.get("screenshot") or ""
+        if src_rel and not (run_dir / src_rel).exists():
+            src_rel = ""
+        if src_rel and sid and owner(src_rel) not in (None, sid):
+            src_rel = ""   # a picture of a different screen: never use it
+        if not src_rel and slide and slide.get("shot"):
+            src_rel = slide["shot"]
+        needle = _needle(f)
+        if needle and sid and not f.get("box"):
+            # a text issue: use the picture of this screen where the words are really visible
+            cands = [src_rel, (slide or {}).get("shot", "")] + [r for r in shot_boxes if owner(r) == sid]
+            hit = None
+            for c in [c for c in cands if c]:
+                tb = shot_boxes.get(c) or ((slide or {}).get("boxes") if c == (slide or {}).get("shot") or c == f.get("screenshot") else None)
+                if tb and _find_text_box(tb, needle):
+                    hit = c
+                    break
+            if hit:
+                if hit != src_rel:
+                    f["screenshot"] = src_rel = hit
+            elif f.get("check") in ("grammar", "spelling", "transcript") and "not seen on screen" not in (f.get("detail") or ""):
+                f["detail"] = ((f.get("detail") or "") + "\nThis text was not seen on screen during testing: it is in a part of the screen that opens on a click (layer), or it is hidden.").strip()
+        name = f"bundle/f{i:03d}.jpg"
+        sb_img = None
+        if res.get("stage") == "sb" and sb_words:
+            # SB stage: the evidence is the SB page itself, with the words the issue is about outlined
+            got = _sb_evidence(run_dir, sb_words, f, name, tag=f.get("tag", ""))
+            if got:
+                f["screenshot"], f["box"] = got, None
+                continue
+        if f.get("check") == "content" and sb_words:
+            sb_img = _sb_evidence(run_dir, sb_words, f, f"bundle/f{i:03d}_sb.jpg")
+        if not src_rel and sid:
+            # the tester could not open this screen: say so plainly instead of borrowing a picture
+            _placeholder(run_dir / name, (slide or {}).get("label") or f.get("slide_label") or "This screen")
+            f["screenshot"], f["box"] = name, None
+        elif not src_rel and not sid and sb_img:
+            f["screenshot"], f["box"] = sb_img, None   # e.g. an SB screen missing from the course
+            sb_img = None
+        else:
+            src_rel = src_rel or course_wide
+            if not src_rel:
+                continue
+            src_is_bundle = src_rel.startswith("bundle/")
+            vw = f.get("vw") or (slide or {}).get("vw") or 1366
+            if src_is_bundle and src_rel != (f.get("screenshot") or ""):
+                vw = 1366  # slide images are already saved at the desktop layout
+            box = _locate(f, slide, shot_boxes, f.get("screenshot") or "")
+            _render(run_dir / src_rel, run_dir / name, box, vw, f.get("tag", ""), more=f.get("boxes"))
+            f["screenshot"], f["box"] = name, box
+        if sb_img:
+            f["sb_screenshot"] = sb_img
+            xl = f"bundle_xl/f{i:03d}.jpg"
+            _side_by_side(run_dir / f["screenshot"], run_dir / sb_img, run_dir / xl,
+                          "COURSE – " + ((slide or {}).get("label") or f.get("slide_label") or ""), "STORYBOARD (SB)")
+            f["xl_screenshot"] = xl
+    _save(run_dir, res)
+    names = {f"bundle/{p.name}": p.name for p in sorted(out.glob("*.jpg"))}
+    (out / "names.json").write_text(json.dumps(names, indent=1))
+    print(json.dumps({"count": len(names), "files": [str(out / n) for n in names.values()]}, indent=1))
+
+
+def cmd_report(a):
+    """Builds the QC Review workbook and splits it into base64 parts for upload."""
+    import base64
+    from beta import qc_report
+    run_dir, res = _paths(a)
+    meta = json.loads((run_dir / "run.json").read_text())
+    stem = re.sub(r"[^\w.-]+", "_", Path(meta.get("name", "course")).stem)
+    out = run_dir / f"QC_Review_{stem}.xlsx"
+    qc_report.build(res, meta, run_dir, out)
+    data = out.read_bytes()
+    parts = []
+    for i in range(0, max(len(data), 1), 14 * 1024 * 1024):
+        pp = run_dir / f"report_part{len(parts) + 1}.txt"
+        pp.write_text(base64.b64encode(data[i:i + 14 * 1024 * 1024]).decode())
+        parts.append(str(pp))
+    _phase(a, "upload")
+    print(json.dumps({"xlsx": str(out), "report_name": out.name, "size": len(data), "parts": parts}, indent=1))
+
+
+def cmd_finalize(a):
+    run_dir, res = _paths(a)
+    names = json.loads((run_dir / "bundle" / "names.json").read_text())
+    ids = json.loads(Path(a.map).read_text())  # {"x.jpg": "<asset id>"}
+
+    def conv(r):
+        n = names.get(r)
+        return ids.get(n, "") if n else ""
+    for f in res["findings"]:
+        if f.get("screenshot"):
+            f["screenshot"] = conv(f["screenshot"])
+        if f.get("sb_screenshot"):
+            f["sb_screenshot"] = conv(f["sb_screenshot"])
+        f.pop("xl_screenshot", None)
+    for s in res.get("slides", []):
+        if s.get("shot"):
+            s["shot"] = conv(s["shot"])
+        s.pop("boxes", None)
+    for f in res["findings"]:
+        f.pop("box", None)
+        f.pop("locate", None)
+    res.pop("shot_boxes", None)
+    comp = res.get("completion") or {}
+    for k in ("panel_shot", "final_shot"):
+        if comp.get(k):
+            comp[k] = conv(comp[k])
+    res["finished_at"] = time.time()
+    _save(run_dir, res)
+    out = run_dir / "results_upload.json"
+    out.write_text(json.dumps(res, ensure_ascii=False))
+    s = res["summary"]
+    print(json.dumps({"results_file": str(out),
+                      "totals": {"errors": sum(v["errors"] for v in s.values()),
+                                 "warnings": sum(v["warnings"] for v in s.values())},
+                      "summary": {k: v["status"] for k, v in s.items()},
+                      "course_title": res.get("course_title", ""), "slide_count": res.get("slide_count", 0)},
+                     indent=1))
+
+
+def _phase(a, name):
+    try:
+        from beta.progress import Progress
+        run_dir = Path(a.work).resolve() / "runs" / a.id
+        if run_dir.exists():
+            Progress(run_dir).phase(name)
+    except Exception:
+        pass
+
+
+def cmd_progress(a):
+    """Progress for the website: {pct, eta_s, stage, progress, log}. --step moves to a phase first."""
+    from beta.progress import Progress
+    run_dir = Path(a.work).resolve() / "runs" / a.id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    pr = Progress(run_dir)
+    if a.step:
+        if a.step == "done":
+            pr.finish()
+        else:
+            pr.phase(a.step)
+    v = pr.view()
+    lines = []
+    lf = run_dir / "log.txt"
+    if lf.exists():
+        lines = [l.rstrip() for l in lf.read_text(encoding="utf-8", errors="replace").splitlines() if l.strip()][-12:]
+    v["progress"] = v["stage"] if a.step or not lines else lines[-1].split("  ", 1)[-1]
+    v["log"] = lines
+    print(json.dumps(v, ensure_ascii=False))
+    return 0
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="beta.cli")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("run")
+    for k in ("--work", "--id", "--upload", "--kind"):
+        r.add_argument(k, required=True)
+    for k in ("--captions", "--options", "--glossary", "--name", "--sb"):
+        r.add_argument(k)
+    for name, extra in (("merge", "--answers"), ("bundle", None), ("report", None), ("finalize", "--map")):
+        q = sub.add_parser(name)
+        q.add_argument("--work", required=True)
+        q.add_argument("--id", required=True)
+        if extra:
+            q.add_argument(extra, required=True)
+    q = sub.add_parser("progress")
+    q.add_argument("--work", required=True)
+    q.add_argument("--id", required=True)
+    q.add_argument("--step", choices=["prepare", "review", "report", "upload", "done"])
+    a = p.parse_args(argv)
+    return {"run": cmd_run, "progress": cmd_progress, "merge": cmd_merge, "bundle": cmd_bundle, "report": cmd_report, "finalize": cmd_finalize}[a.cmd](a) or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
