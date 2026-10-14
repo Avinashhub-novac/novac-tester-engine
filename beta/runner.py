@@ -45,7 +45,8 @@ class Run:
 
     def finish(self, slides, extra=None):
         f = [x.to_dict() for x in self.col.findings]
-        result = {"summary": summarize(f, self.col.checks_run, self.col.checks_skipped), "findings": f,
+        from .release import stamp
+        result = {"made_with": stamp(), "summary": summarize(f, self.col.checks_run, self.col.checks_skipped), "findings": f,
                   "slides": slides, "checks_run": sorted(self.col.checks_run),
                   "checks_skipped": self.col.checks_skipped, **(extra or {})}
         (self.dir / "results.json").write_text(json.dumps(result, indent=1, ensure_ascii=False))

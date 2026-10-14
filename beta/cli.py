@@ -656,6 +656,16 @@ def cmd_progress(a):
     return 0
 
 
+def cmd_check_env(a):
+    """Stops a run before it starts if any tool differs from the frozen release."""
+    from beta import release
+    here = Path(__file__).resolve().parent
+    manifest = json.loads(Path(a.manifest).read_text()) if a.manifest else None
+    r = release.check(here, manifest)
+    print(json.dumps(r, indent=1))
+    return 0 if r["ok"] else 3
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="beta.cli")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -674,8 +684,10 @@ def main(argv=None):
     q.add_argument("--work", required=True)
     q.add_argument("--id", required=True)
     q.add_argument("--step", choices=["prepare", "review", "report", "upload", "done"])
+    q = sub.add_parser("check-env")
+    q.add_argument("--manifest")
     a = p.parse_args(argv)
-    return {"run": cmd_run, "progress": cmd_progress, "merge": cmd_merge, "bundle": cmd_bundle, "report": cmd_report, "finalize": cmd_finalize}[a.cmd](a) or 0
+    return {"run": cmd_run, "progress": cmd_progress, "check-env": cmd_check_env, "merge": cmd_merge, "bundle": cmd_bundle, "report": cmd_report, "finalize": cmd_finalize}[a.cmd](a) or 0
 
 
 if __name__ == "__main__":
