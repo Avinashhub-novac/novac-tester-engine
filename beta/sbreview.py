@@ -231,6 +231,8 @@ def auto_checks(pages, marked, variant):
     for n, text in pages.items():
         words = set(re.findall(r"[a-z]+", text.lower()))
         for us, uk in US_UK:
+            if us in AMBIGUOUS:   # correct in both variants in some senses (check, program): left to the reviewer
+                continue
             wrong, right = (uk, us) if variant == "us" else (us, uk)
             for w in words:
                 if w == wrong or (len(wrong) > 4 and w.startswith(wrong) and w[len(wrong):] in ("s", "d", "ed", "ing", "es", "al", "ally")):

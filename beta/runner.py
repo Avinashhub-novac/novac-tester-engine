@@ -128,11 +128,13 @@ class Run:
         opts = self.meta.get("options", {})
         stage = opts.get("stage", "beta")
         gold = stage == "gold"
-        passes = [p for p in ("desktop", "restrict", "prev", "menu", "buttons", "mobile") if opts.get(p, True)]
+        passes = [p for p in ("desktop", "restrict", "prev", "menu", "buttons", "assessment", "mobile") if opts.get(p, True)]
         if stage != "beta" or not any(v in ("restricted", "free") for v in (opts.get("expect") or {}).values()):
             passes.remove("restrict")
         if gold:   # Gold / Showstopper: functionality only (navigation and the assessment)
-            passes = ["desktop", "prev"]
+            passes = ["desktop", "prev", "assessment"]
+        if not any(s.is_quiz for s in course.slides):
+            passes = [p for p in passes if p != "assessment"]
         crawler = Crawler(course, url, self.dir, self.col, play_full=opts.get("play_full", True),
                           max_minutes=config.MAX_CRAWL_MINUTES, log=self.log, max_buttons=config.MAX_BUTTONS_PER_SLIDE)
         crawler.expect = opts.get("expect") or {}
@@ -146,6 +148,25 @@ class Run:
         crawler.on_progress = self.prog.tick
         visits = crawler.run(passes)
         self.prog.phase("analyse")
+        self.crawler, self.passes = crawler, passes
+        if crawler.blocked:
+            stop = crawler.label(crawler.blocked["sid"])
+            for c in ("menu", "buttons", "swipe", "restrictions", "completion", "interactivity"):
+                if c not in self.col.checks_run:
+                    self.col.skip(c, f"Testing stopped at {stop}: the learner cannot go past this screen")
+            if "assessment" in passes:
+                self.col.skip("assessment", f"Testing stopped at {stop}, so the assessment was not tested")
+        tables = self.test_tables(course, visits, crawler, passes)
+        for v in visits.values():   # every picture taken of a screen, with where its text sits
+            for key in ("cap_shots", "layer_shots", "text_shots"):
+                for c in v.get(key, []) or []:
+                    if c.get("shot"):
+                        self.shot_boxes[c["shot"]] = c.get("boxes") or {}
+            if v.get("transcript_shot"):
+                self.shot_boxes[v["transcript_shot"]] = v.get("transcript_boxes") or {}
+        if crawler.blocked:   # the rest of the review covers only the screens the learner can reach
+            reach = set(crawler.order)
+            course.slides = [x for x in course.slides if x.id in reach]
         if gold:
             for c in ("menu", "buttons", "swipe", "seekbar", "screen_number", "transcript", "content", "restrictions", "completion"):
                 self.col.skip(c, "Gold / Showstopper: only major language errors, navigation and the assessment are checked")
@@ -153,7 +174,8 @@ class Run:
             self.gold_language(course, visits)
             slides = self.slide_list(course, visits, crawler)
             self.finish(slides, {"course_title": course.title, "slide_count": len(course.slides),
-                                 "completion": crawler.completion, "shot_boxes": self.shot_boxes, "stage": "gold"})
+                                 "completion": crawler.completion, "shot_boxes": self.shot_boxes, "stage": "gold",
+                                 **tables})
             return
         if "mobile" not in passes:
             self.col.skip("swipe", "Alpha review: mobile is not tested" if opts.get("stage") == "alpha"
@@ -278,13 +300,87 @@ class Run:
         for sid in order:
             s = course.by_id(sid)
             dom = visits.get(sid, {}).get("text", "")
-            seq.append((sid, s.label if s else sid, dom + "\n" + (s.all_text() if s else "")))
-        textcheck.check_screen_numbers(seq, self.col)
+            seq.append((sid, s.label if s else sid, dom + "\n" + (s.all_text() if s else ""), s.title if s else ""))
+        if crawler.blocked:   # only the screens the learner can reach
+            reach = set(crawler.order)
+            seq = [x for x in seq if x[0] in reach]
+        from .crawler import is_welcome
+        textcheck.check_screen_numbers(seq, self.col, assess=crawler.assess_ids, results=crawler.results_ids,
+                                       welcome={s.id for s in course.slides if is_welcome(s)}, partial=bool(crawler.blocked))
 
         slides = self.slide_list(course, visits, crawler)
         self.finish(slides, {"course_title": course.title, "slide_count": len(course.slides),
                              "completion": crawler.completion, "shot_boxes": shot_boxes,
-                             "restrictions": crawler.restrictions, "stage": opts.get("stage", "beta")})
+                             "restrictions": crawler.restrictions, "stage": opts.get("stage", "beta"),
+                             **tables})
+
+    def test_tables(self, course, visits, crawler, passes):
+        """Navigation test (every screen: Next, Back, menu, clickables) and the assessment test, for the report tabs."""
+        from .crawler import is_welcome
+        from .wording import plain
+        ids = course.ids()
+        stop_at = ids.index(crawler.blocked["sid"]) if crawler.blocked and crawler.blocked["sid"] in ids else None
+        rows = []
+        for k, s in enumerate(course.slides):
+            v = visits.get(s.id, {})
+            fs = [f for f in self.col.findings if f.slide_id == s.id and not f.mobile and f.severity in ("error", "warning")
+                  and f.check in ("navigation", "menu", "buttons", "interactivity")]
+            back_f = [f for f in fs if f.check == "navigation" and re.search(r"\b(prev|back)\b", f.message, re.I)
+                      and "goes back to an earlier" not in f.message]
+            next_f = [f for f in fs if f.check == "navigation" and f not in back_f]
+            menu_f = [f for f in fs if f.check == "menu"]
+            click_f = [f for f in fs if f.check in ("buttons", "interactivity")]
+            after_stop = stop_at is not None and k > stop_at
+            no_nav = is_welcome(s) or s.id in crawler.quiz_ids or s.id in crawler.results_ids
+            nt = "Not tested (testing stopped)" if after_stop else "Not tested"
+
+            def res(found, ran, na=False):
+                if after_stop:
+                    return nt
+                if found:
+                    return "Fail"
+                if na:
+                    return "N/A"
+                return "Pass" if ran else "Not tested"
+            last = k == len(course.slides) - 1
+            reached = s.id in crawler.order
+            c = crawler.clicks.get(s.id)
+            if after_stop:
+                clicks = nt
+            elif s.id in crawler.quiz_ids or s.id in crawler.results_ids:
+                clicks = "See Assessment tab" if crawler.assessment else ("Fail" if click_f else "Not tested")
+            elif c is not None:
+                n = len(c["items"])
+                dead = sum(1 for i in c["items"] if not i["opened"])
+                stuck = sum(1 for i in c["items"] if i["closed"] is False)
+                if not click_f:
+                    clicks = f"Pass ({n} item{'s' if n != 1 else ''} opened" + (" and closed)" if any(i["closed"] for i in c["items"]) else ")") if n else "No clickable items"
+                else:
+                    bits = [f"{dead} of {n} did nothing" if dead else "", f"{stuck} pop-up{'s' if stuck != 1 else ''} did not close" if stuck else "",
+                            c.get("rule") or ""]
+                    clicks = "Fail" + (" – " + "; ".join(b for b in bits if b) if any(bits) else "")
+            elif s.id in crawler.quiz_ids:
+                clicks = "See Assessment tab"
+            else:
+                clicks = "Fail" if click_f else ("Not tested" if "buttons" not in passes or crawler.blocked else "No clickable items")
+            row = {"sid": s.id, "index": s.index, "title": s.title, "label": s.label,
+                   "reached": "Not tested (testing stopped)" if after_stop else ("Yes" if reached else ("No – opened directly" if v.get("via_jump") else "No")),
+                   "next": res(next_f, reached or k == 0, na=last and not next_f),
+                   "back": res(back_f, "prev" in passes and not crawler.blocked, na=(no_nav or k == 0) and not back_f),
+                   "menu": res(menu_f, "menu" in passes and not crawler.blocked),
+                   "clicks": clicks,
+                   "notes": "; ".join(dict.fromkeys(plain(f.message)[0] for f in fs))[:600] + (("; " if fs else "") + v["note"] if v.get("note") else "")}
+            if is_welcome(s):
+                row["notes"] = (row["notes"] + "; " if row["notes"] else "") + "Welcome screen: no Back/Next expected (START moves on)"
+            if s.id in crawler.quiz_ids or s.id in crawler.results_ids:
+                row["notes"] = (row["notes"] + "; " if row["notes"] else "") + "Assessment screen: no Back/Next expected"
+            vals = [row["next"], row["back"], row["menu"], row["clicks"]]
+            row["result"] = ("Not tested" if after_stop else "Fail" if any(str(x).startswith("Fail") for x in vals)
+                             else "Pass")
+            if crawler.blocked and crawler.blocked["sid"] == s.id:
+                row["result"] = "Fail – testing stopped here"
+            rows.append(row)
+        return {"nav_table": rows, "assessment": crawler.assessment, "blocked": crawler.blocked, "passes": list(passes)}
 
     def slide_list(self, course, visits, crawler):
         slides = []
@@ -484,7 +580,11 @@ class Run:
             "english": variant, "requirements": opts.get("requirements", ""),
             "rules": [{"rule": i + 1, "text": t} for i, (_, t) in enumerate(sbreview.RULES)],
             "already_found": [{"page": i["page"], "rule": i["rule"], "quote": i["quote"]} for i in auto]}
-        slides = [{"id": f"p{k}", "index": k, "title": titles.get(k, ""), "label": f"Page {k}",
+        def screen_no(t):
+            m = re.search(r"\b(?:screen|slide)\s*(?:no\.?|number|#)?\s*[:\-]?\s*(\d{1,3})\b", t or "", re.I)
+            return m.group(1) if m else ""
+        slides = [{"id": f"p{k}", "index": k, "title": re.sub(r"^\s*(?:screen|slide)\s*\d{1,3}\s*[:\-–]\s*", "", titles.get(k, ""), flags=re.I),
+                   "screen": screen_no(pages[k]), "label": f"Page {k}",
                    "reached": True, "shot": f"sb/page{k}.png", "vw": 0} for k in sorted(pages)]
         self.finish(slides, {"stage": "sb", "slide_count": len(pages), "english": variant,
                              "course_title": Path(self.meta.get("name", "")).stem})
@@ -686,4 +786,6 @@ def issue_to_finding(iss, item):
             "message": f"{cat.capitalize()} in {where}: “{iss.get('original', '')}”",
             "slide_id": item.get("slide_id", ""), "slide_label": item.get("label", ""), "time": item.get("time", ""),
             "suggestion": iss.get("suggestion", ""), "detail": iss.get("explanation", ""),
+            "course_says": iss.get("original", ""),
+            "fix": (f"Change “{iss.get('original', '')}” to “{iss['suggestion']}”." if iss.get("suggestion") else ""),
             "screenshot": text_shot(item, iss.get("original", ""))}

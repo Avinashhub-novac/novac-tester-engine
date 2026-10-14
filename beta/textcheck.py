@@ -21,43 +21,61 @@ def find_screen_number(text):
     return None
 
 
-def check_screen_numbers(seq, col):
-    """seq: [(slide_id, label, text)] in learner order."""
-    found = [(sid, lab, find_screen_number(t)) for sid, lab, t in seq]
+def _same_title(a, b):
+    n = lambda t: " ".join(WORDS.findall((t or "").lower()))
+    return n(a) == n(b)
+
+
+def check_screen_numbers(seq, col, assess=(), results=(), welcome=(), partial=False):
+    """seq: [(slide_id, label, text, title)] in learner order.
+    Team rules: screens may repeat a number when they carry the same title (one screen built as several slides);
+    the assessment's rules, questions and results share one number, and the results screen may have none;
+    the welcome screen has none. Numbers must run in order without gaps."""
+    seq = [x if len(x) == 4 else (*x, "") for x in seq]
+    found = [(sid, lab, find_screen_number(t), title) for sid, lab, t, title in seq]
     numbered = [f for f in found if f[2]]
     if not seq or len(numbered) < max(2, len(seq) * 0.5):
         col.skip("screen_number", "Fewer than half of the slides show a 'Screen N of M' label")
         return
     col.ran("screen_number")
+    assess, results, welcome = set(assess), set(results), set(welcome)
     totals = {}
-    for _, _, n in numbered:
+    for _, _, n, _ in numbered:
         totals[n[1]] = totals.get(n[1], 0) + 1
     common_total = max(totals, key=totals.get)
-    seen, prev = {}, None
+    first_with = {}           # number -> (sid, label, title) of the first screen that showed it
+    prev = prev_sid = None
     started = False
-    for sid, lab, n in found:
+    for sid, lab, n, title in found:
         if not n:
-            if started:
+            if started and sid not in results and sid not in welcome and sid not in assess:
                 col.add("screen_number", "warning", "Slide has no screen number while the slides around it do",
-                        slide_id=sid, slide_label=lab)
+                        slide_id=sid, slide_label=lab, fix="Add the screen number, in the same style as the other screens.")
             continue
         started = True
         a, b, raw = n
         if b != common_total:
             col.add("screen_number", "error", f"Wrong total in screen number: '{raw}'", slide_id=sid, slide_label=lab,
-                     suggestion=f"{a} of {common_total}")
-        if a in seen:
-            col.add("screen_number", "error", f"Duplicate screen number {a}", slide_id=sid, slide_label=lab,
-                     detail=f"Also on {seen[a]}")
-        seen.setdefault(a, lab)
-        if prev is not None and a != prev + 1 and a not in (prev,):
-            col.add("screen_number", "error", f"Screen number out of order: {raw}", slide_id=sid, slide_label=lab,
-                     detail=f"Previous numbered slide showed {prev}", suggestion=f"{prev + 1} of {common_total}")
-        if prev is None and a != 1:
+                    suggestion=f"{a} of {common_total}")
+        if a in first_with:
+            osid, olab, otitle = first_with[a]
+            both_assess = sid in assess and osid in assess
+            if not both_assess and not _same_title(title, otitle):
+                col.add("screen_number", "error", f"Screen number {a} is used for screens with different titles", slide_id=sid,
+                        slide_label=lab, detail=f"Also on {olab}",
+                        fix="Give each screen with a different title its own number, in order.")
+        else:
+            first_with[a] = (sid, lab, title)
+        if prev is not None:
+            same_screen = a == prev
+            if not same_screen and a != prev + 1:
+                col.add("screen_number", "error", f"Screen number out of order: {raw}", slide_id=sid, slide_label=lab,
+                        detail=f"Previous numbered slide showed {prev}", suggestion=f"{prev + 1} of {common_total}")
+        elif a != 1:
             col.add("screen_number", "warning", f"First numbered slide starts at {a}, not 1", slide_id=sid, slide_label=lab)
-        prev = a
-    count = len(numbered)
-    if common_total != count:
+        prev, prev_sid = a, sid
+    count = len(first_with)
+    if common_total != count and not partial:
         col.add("screen_number", "warning",
                 f"Screen total says {common_total} but {count} slides carry a screen number on the Next path")
 

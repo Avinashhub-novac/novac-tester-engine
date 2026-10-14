@@ -14,7 +14,7 @@ from pathlib import Path
 LABELS = {
     "prepare": "Preparing", "extract": "Opening the course", "desktop": "Playing every screen",
     "restrict": "Checking restrictions", "prev": "Checking Back buttons", "menu": "Checking the menu",
-    "buttons": "Clicking every button", "mobile": "Testing on mobile", "analyse": "Collecting results",
+    "buttons": "Opening and closing every clickable", "assessment": "Testing the assessment", "mobile": "Testing on mobile", "analyse": "Collecting results",
     "video": "Checking the video", "review": "Reviewing text and storyboard", "report": "Making screenshots and report",
     "upload": "Saving the report to the site", "sb": "Reviewing the storyboard",
 }
@@ -31,7 +31,8 @@ def plan_scorm(slides, passes, play_full, has_sb, transcript):
         "restrict": 15 + min(8, n) * 4,
         "prev": n * 2.5 + 5,
         "menu": n * 3 + 5,
-        "buttons": n * 7 + 10,
+        "buttons": n * 9 + 10,
+        "assessment": sum(1 for s in slides if s.is_quiz) * 45 + 90,
         "mobile": (play * 0.8 if play_full else n * 2) + n * 7 + 10,
     }
     for name in passes:

@@ -149,3 +149,66 @@ def apply(findings):
         msg, tag = plain(f.get("message", ""))
         f["message"], f["tag"], f["detail"], f["plain"] = msg, tag, plain_detail(f.get("detail", "")), True
     return findings
+
+
+# What needs to be done, when the check itself did not say (matched on the plain message)
+FIXES = [
+    (r"cannot go past this screen", "Make the way forward work on this screen, then send the course for testing again."),
+    (r"^Next button (not working|opens the wrong screen|goes back)", "Make Next open the next screen as per the SB flow."),
+    (r"^Next button does nothing", "Make Next work on this screen, or hide it when the learner must pick one of the choices."),
+    (r"^Mobile testing could not go forward", "Make the screen's own forward button work on a phone."),
+    (r"^“.+” (button )?not working", "Make this button work (it should open its screen or its content)."),
+    (r"button opens the wrong screen", "Make the button open the correct screen as per the SB flow."),
+    (r"^Back button", "Make Back open the previous screen."),
+    (r"^No Back button", "Add a Back button, or confirm with the ID that it is not needed here."),
+    (r"Next button stays disabled", "Enable Next once the screen has finished and every item has been opened."),
+    (r"^Screen is skipped", "Make Next open every screen in order, or confirm the branch with the ID."),
+    (r"cannot be reached with Next", "Link this screen into the Next path, or confirm the branch with the ID."),
+    (r"^Menu does not show this screen as visited", "Mark the menu item as visited once the screen is viewed."),
+    (r"^Menu does not highlight", "Highlight the current screen in the menu."),
+    (r"^Menu title", "Use the same title in the menu and on the screen."),
+    (r"not listed in the menu", "Add this screen to the menu."),
+    (r"^Menu item", "Make the menu item open its own screen."),
+    (r"Menu items cannot be opened", "Unlock the menu, or confirm with the RCD that it should be locked."),
+    (r"Button not working|button not working|buttons not working", "Make the button work, or remove it if it is not needed."),
+    (r"Swiping", "Make swiping on a phone behave like Next / Back."),
+    (r"^Seekbar is shown on a screen with no audio", "Hide the seekbar on this screen, or add the missing audio."),
+    (r"^Seekbar does not move", "Make the seekbar follow the audio."),
+    (r"^Wrong total in screen number", "Use the same screen total on every screen."),
+    (r"used for screens with different titles", "Give each screen with a different title its own number, in order."),
+    (r"^Screen number out of order", "Number the screens in order (1, 2, 3 …)."),
+    (r"^Screen number missing", "Add the screen number, in the same style as the other screens."),
+    (r"^Screen numbers start at", "Start the screen numbers at 1."),
+    (r"^Screen total says", "Make the total match the number of numbered screens."),
+    (r"does not report progress to the LMS", "Publish for LMS (SCORM) with tracking switched on, and upload that zip."),
+    (r"does not show as completed", "Check the tracking settings (Publish → LMS) and the completion trigger."),
+    (r"(locked|open) as per RCD|should be (locked|free|open) as per RCD", "Set this as the RCD says."),
+    (r"^Captions missing", "Add closed captions for the narration."),
+    (r"^Captions do not match", "Make the captions match the narration / transcript word for word."),
+    (r"Caption shown when no one is speaking|Captions continue after", "Fix the caption timing."),
+    (r"^Spelling mistake", "Correct the spelling."),
+    (r"^Grammar mistake", "Correct the grammar."),
+    (r"^Punctuation mistake", "Correct the punctuation."),
+    (r"^Not as per SB", "Change the course to match the SB."),
+    (r"^Storyboard not uploaded", "Upload the course again together with its storyboard."),
+    (r"appears more than once|repeated|[Dd]uplicate", "Remove the repeated text."),
+    (r"^Ordinal ending is not in superscript", "Set the ordinal ending (st, nd, rd, th) in superscript."),
+    (r"[Mm]issing space", "Add the missing space."),
+    (r"[Dd]ouble space|extra space", "Remove the extra space."),
+    (r"Pop-up does not close", "Make the Close button close the pop-up."),
+    (r"Text overlaps other text", "Move or resize the text boxes so they do not cover each other."),
+    (r"Next is enabled before all clickable items", "Keep Next disabled until every clickable item has been opened."),
+    (r"Next stays disabled after all clickable items", "Enable Next once every clickable item has been opened."),
+    (r"^Answer option cannot be selected", "Make this option clickable so the learner can choose it."),
+    (r"[Rr]esults screen", "Check the results screen and the quiz settings so the result is shown and reported correctly."),
+    (r"Black screen|Video freezes|no picture", "Fix the video at this point."),
+    (r"course shows an error", "Fix the error on this screen (it may stop the screen working)."),
+    (r"file is missing", "Add the missing file and publish again."),
+]
+
+
+def default_fix(message):
+    for pat, fix in FIXES:
+        if re.search(pat, message or ""):
+            return fix
+    return "Correct this and check the screen again."

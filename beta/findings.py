@@ -16,6 +16,7 @@ CHECKS = [
     ("content", "Content mapping (SB)"),
     ("video", "Video"),
     ("assessment", "Assessment"),
+    ("interactivity", "Clickables & pop-ups"),
     ("logic", "Logic & facts"),
     ("sb_language", "SB: Language"),
     ("sb_consistency", "SB: Consistency"),
@@ -46,6 +47,9 @@ class Finding:
     sb_says: str = ""     # SB stage / content mapping: the SB wording the issue is about (marked on the SB page picture)
     sb_page: int = 0      # SB page that wording is on
     rule: str = ""        # SB stage: the checklist rule the issue breaks
+    course_says: str = "" # content mapping: what the course shows (the SB wording is in sb_says)
+    fix: str = ""         # what needs to be done (report: "What needs to be done")
+    blocker: bool = False # the learner cannot go past this screen: testing stopped here
 
     def to_dict(self):
         return asdict(self)
