@@ -211,6 +211,8 @@ TEXTBOX_JS = r"""
     const raw = node.textContent;
     if (!raw || !raw.trim()) continue;
     const el = node.parentElement; if (!el) continue;
+    // the screen-reader copy is laid out differently from the text the learner sees: never use it for word positions
+    if (el.closest('.acc-shadow-dom, .acc-shadow-el, [class*="acc-shadow"]')) continue;
     const s = getComputedStyle(el);
     if (s.visibility === 'hidden' || s.display === 'none' || parseFloat(s.opacity) < 0.05) continue;
     range.selectNodeContents(node);

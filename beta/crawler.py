@@ -21,7 +21,8 @@ def _norm(s):
     return " ".join(WORD.findall((s or "").lower()))
 
 
-WELCOME_RE = re.compile(r"\b(welcome|start|begin|intro|introduction|title|splash|launch|home|cover)\b", re.I)
+WELCOME_RE = re.compile(r"\b(welcome|start|begin|splash|launch|cover)\b", re.I)
+END_RE = re.compile(r"\b(thank\s*you|thankyou|thanks|congratulations|the end|end of (the )?(course|module)|completion|conclusion)\b", re.I)
 
 
 def is_welcome(slide):
@@ -29,7 +30,14 @@ def is_welcome(slide):
     button instead of Next – both are normal and never reported."""
     if not slide:
         return False
-    return slide.index == 1 or (slide.index <= 2 and bool(WELCOME_RE.search(slide.title or "")))
+    return slide.index == 1 or (slide.index == 2 and bool(WELCOME_RE.search(slide.title or "")))
+
+
+def is_end(slide, n):
+    """The closing screen (thank you / congratulations): like the welcome screen it carries no screen number."""
+    if not slide:
+        return False
+    return slide.index == n or bool(END_RE.search(slide.title or ""))
 
 
 class Deadline(Exception):
@@ -58,6 +66,9 @@ class Crawler(QuizMixin):
         self.on_progress = None   # callback(pass name, done, total) for the progress bar
         self.check_completion = True   # Beta only: read what the course reports to the LMS at the end
         self.blocked = None       # {sid, reason}: the learner cannot go past this screen, so testing stopped there
+        self.dead_back = set()    # screens whose Back arrow does nothing (already reported as a Back failure)
+        self.run_menu = True      # the menu is part of this test (set from the passes)
+        self.menu_done = False    # the course's own menu was already tested at the end of the Next walk
         self.assessment = None    # what the assessment pass found (questions, options, scenarios)
         self.clicks = {}          # slide id -> clickables opened / closed and the Next state before and after
         rules, quiz, results = assessment_parts(course)
@@ -702,6 +713,7 @@ class Crawler(QuizMixin):
             sid = self.identify(st, expected=carry or getattr(self, "_jumped", None))
             carry = self._jumped = None
             self.current = sid
+            self._slide_t0 = time.time()
             first_visit = sid not in self.visits
             rec = self.visits.setdefault(sid, {"captions": [], "seek": [], "media_requests": set(), "shot": "",
                                                "seek_visible": False, "text": st["text"], "title": st["title"]})
@@ -766,6 +778,9 @@ class Crawler(QuizMixin):
                     self._fill_inputs(page)
                     b = self._submit_box(page)
                     nav = {"box": b, "label": "Submit", "target": slide.next_target if slide else "NEXT"}
+                if nav is None and slide and slide.index < n and not slide.has_interaction:
+                    self._wait_full(page, slide)
+                    nav = self.slide_nav(page, slide, "forward")
                 if nav is None:
                     if slide and slide.index < n:
                         if not slide.has_interaction:
@@ -785,7 +800,7 @@ class Crawler(QuizMixin):
                 st2 = self.settle(page)
                 new = self.identify(st2, expected=expected if self._moved(before, self._sig(st2)) else None)
                 carry = new
-                lab = nav["label"] or "the slide's forward button"
+                lab = nav["label"] or "Next arrow on the screen"
                 if new == sid:
                     def again(nav=nav, expected=expected):
                         here = self.identify(self.state(page))
@@ -796,6 +811,14 @@ class Crawler(QuizMixin):
                         s2 = self.settle(page)
                         return self.identify(s2, expected=expected if self._moved(b, self._sig(s2)) else None)
                     new = self._unstick(page, sid, slide, again)
+                    carry = new
+                if new == sid and not (slide and slide.has_interaction):
+                    self._wait_full(page, slide)   # the button may unlock only when the audio ends
+                    nav2 = self.slide_nav(page, slide, "forward") or nav
+                    b2 = self._sig(self.state(page))
+                    self.click_box(page, nav2["box"])
+                    s2 = self.settle(page)
+                    new = self.identify(s2, expected=expected if self._moved(b2, self._sig(s2)) else None)
                     carry = new
                 if new == sid:
                     if not (slide and slide.has_interaction):   # an activity must be finished first: not a fault
@@ -823,6 +846,9 @@ class Crawler(QuizMixin):
                         self.col.ran("navigation")
                         prev_sid = sid
                         continue
+                    st = self.state(page)
+                if st["nextDisabled"] and slide and slide.index < n and not slide.has_interaction:
+                    self._wait_full(page, slide)
                     st = self.state(page)
                 if st["nextDisabled"]:
                     if slide and slide.index >= n:
@@ -868,6 +894,13 @@ class Crawler(QuizMixin):
                         carry = moved
                         prev_sid = sid
                         continue
+            if new == sid and not (slide and slide.has_interaction):
+                self._wait_full(page, slide)
+                b2 = self._sig(self.state(page))
+                self.click_first(page, SEL["next"])
+                s2 = self.settle(page)
+                new = self.identify(s2, expected=(slide.next_target if slide else None) if self._moved(b2, self._sig(s2)) else None)
+                carry = new
             if new == sid:
                 if not (slide and slide.has_interaction):
                     self._block(sid, "Next button does not go to the next screen", rec["shot"], st.get("nextBox"))
@@ -891,6 +924,17 @@ class Crawler(QuizMixin):
                 self.capture_completion(page, ctx)
             except Exception as e:
                 self.completion = {"error": repr(e)[:300]}
+        if self.run_menu and not self.ensure_menu(page):
+            # a menu built into the screens often opens topics only once they are completed: test it now, in the
+            # session that has just played the whole course
+            try:
+                self.log("Menu: testing the course's own menu after playing the course")
+                if self.custom_menu_pass(page, after_walk=True) is not False:
+                    self.menu_done = True
+            except Deadline:
+                raise
+            except Exception as e:
+                self.log(f"Menu test after the walk did not finish: {e!r}"[:200])
         try:
             self.visit_rest(page)
         except Deadline:
@@ -1054,6 +1098,70 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
         except Exception:
             return None
 
+    def _visible_box(self, page, model_id):
+        """Box of an object only when a learner can see and click it: shown, not see-through, and not covered
+        by a layer or another object at its centre."""
+        try:
+            return page.evaluate("""(id) => { for (const el of document.querySelectorAll('[data-model-id="' + id + '"]')) {
+                const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+                if (r.width <= 2 || r.height <= 2 || s.visibility === 'hidden' || s.display === 'none') continue;
+                let op = 1; for (let p = el; p && p !== document.body; p = p.parentElement) {
+                  const ps = getComputedStyle(p); if (ps.display === 'none' || ps.visibility === 'hidden') { op = 0; break; }
+                  op *= parseFloat(ps.opacity || '1'); }
+                if (op < 0.2) continue;
+                const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+                if (cx < 0 || cy < 0 || cx > innerWidth || cy > innerHeight) continue;
+                const top = document.elementFromPoint(cx, cy);
+                if (!top) continue;
+                const owner = top.closest('[data-model-id]');
+                if (top === el || el.contains(top) || (owner && (owner === el || el.contains(owner)))) return [r.x, r.y, r.width, r.height];
+              }
+              return null; }""", model_id)
+        except Exception:
+            return None
+
+    def _arrow_name(self, page, slide, box):
+        """Names an unnamed button by where it sits: just left of the screen's Next arrow it is the Back arrow."""
+        if not box or not slide:
+            return None
+        fwd = self.slide_nav(page, slide, "forward")
+        if fwd:
+            fb = fwd["box"]
+            cy, fy = box[1] + box[3] / 2, fb[1] + fb[3] / 2
+            if abs(cy - fy) < 14:
+                if 0 < fb[0] - box[0] < 140:
+                    return "Back arrow"
+                if 0 < box[0] - fb[0] < 140:
+                    return "Next arrow"
+            return None
+        # no working Next on this screen: a pair of small unnamed buttons side by side in the lower part of the
+        # screen is the Back / Next pair (left = Back, right = Next)
+        if box[2] > 70 or box[3] > 70 or box[1] < 768 * 0.55:
+            return None
+        cy = box[1] + box[3] / 2
+        for co in slide.click_objects:
+            b = self._visible_box(page, co["id"])
+            if not b or b == box or b[2] > 70 or b[3] > 70 or abs(b[1] + b[3] / 2 - cy) >= 14:
+                continue
+            if 0 < b[0] - box[0] < 140:
+                return "Back arrow"
+            if 0 < box[0] - b[0] < 140:
+                return "Next arrow"
+        return None
+
+    def _dead_back(self, page, slide):
+        """The screen's Back arrow when it has no working action: (box) or None."""
+        if not slide:
+            return None
+        nav_ids = {o["id"] for o in slide.nav_objects}
+        for d in slide.dead_click_objects:
+            if not isinstance(d, dict) or d["id"] in nav_ids:
+                continue
+            b = self._visible_box(page, d["id"])
+            if b and self._arrow_name(page, slide, b) == "Back arrow":
+                return b
+        return None
+
     def slide_nav(self, page, slide, direction="forward"):
         """The slide's own navigation button, for players without Next/Prev: {box, label, target} or None."""
         ids = self.course.ids()
@@ -1173,7 +1281,24 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
 
     def no_nav_expected(self, slide):
         """Screens without their own Back / Next: the welcome screen and the assessment (questions and result)."""
-        return bool(slide) and (is_welcome(slide) or slide.id in self.quiz_ids or slide.id in self.results_ids)
+        graded = any(x.get("type") not in (None, "view") for x in (self.course.scorings or []))
+        return bool(slide) and (is_welcome(slide) or (graded and slide.id in self.quiz_ids) or slide.id in self.results_ids)
+
+    def _wait_full(self, page, slide):
+        """Before calling a screen a dead end: play it again from the start in real time, without skipping ahead,
+        for its full length (its audio ending is often what unlocks the way forward), like a learner who waits."""
+        if not slide:
+            return
+        dur = (slide.duration_ms / 1000.0) if slide.duration_ms else 0
+        wait = min(dur + 5, 600)
+        self.log(f"{self.label(slide.id)}: playing the screen to its end ({int(wait)} s) before deciding it is stuck")
+        if self.can_jump(page):
+            self.jump(page, slide.id)
+        t0 = time.time()
+        while time.time() - t0 < wait:
+            self.check_time()
+            page.wait_for_timeout(1000)
+        self._unstick(page, slide.id, slide, None)   # click the screen's items again, as a learner would
 
     def _block(self, sid, reason, shot="", box=None):
         """The learner cannot go past this screen: report it as a high issue and stop testing."""
@@ -1241,7 +1366,8 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 lab = back["label"] or "the slide's back button"
                 if new == sid:
                     self.col.add("navigation", "error", f"“{lab}” did not move back", slide_id=sid, slide_label=self.label(sid),
-                                 screenshot=pshot, box=back["box"], vw=1366)
+                                 screenshot=pshot, box=back["box"], vw=1366,
+                                 detail=f"Clicked the “{lab}” (Back) button on {self.label(sid)}.\nExpected: {self.label(expected)} opens.\nResult: the screen did not change.")
                     new = self.goto_slide(page, expected) or expected
                 elif back["target"] in self.course.ids() and new != back["target"] and not new.startswith("unknown"):
                     self.col.add("navigation", "error", f"“{lab}” went to the wrong slide", slide_id=sid, slide_label=self.label(sid),
@@ -1259,7 +1385,8 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             self.log(f"Prev: {self.label(sid)} -> {self.label(new)}")
             self.tick("prev", len(self.order) - len(history), len(self.order))
             if new == sid:
-                self.col.add("navigation", "error", "Prev button did not move back", slide_id=sid, slide_label=self.label(sid))
+                self.col.add("navigation", "error", "Prev button did not move back", slide_id=sid, slide_label=self.label(sid),
+                             detail=f"Clicked the player Back (PREV) button on {self.label(sid)}.\nExpected: {self.label(expected)} opens.\nResult: the screen did not change.")
                 new = self.goto_slide(page, expected) or expected
             elif new != expected and not new.startswith("unknown"):
                 s = self.course.by_id(sid)
@@ -1305,10 +1432,25 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             else:
                 back = self.slide_nav(page, slide, "back")
                 if back is None:
+                    dead = self._dead_back(page, slide)
+                    if dead:
+                        # a Back arrow is on the screen but does nothing: click it to be sure, then report it
+                        pshot = self.shot(page, f"{b}_back")
+                        before = self._sig(st)
+                        self.click_box(page, dead)
+                        st2 = self.settle(page)
+                        if not self._moved(before, self._sig(st2)):
+                            self.col.add("navigation", "error", "“Back arrow” did not move back", slide_id=b,
+                                         slide_label=self.label(b), screenshot=pshot, box=dead, vw=1366, found_in="Navigation",
+                                         detail=f"Clicked the Back arrow on {self.label(b)}.\nExpected: {self.label(a)} opens.\n"
+                                                f"Result: nothing happens (the arrow has no action).",
+                                         fix=f"Add the action to the Back arrow so it opens {self.label(a)}.")
+                            self.dead_back.add(b)
+                        continue
                     if not self.custom_nav:
                         self.col.add("navigation", "warning", "No Prev button on this slide", slide_id=b, slide_label=self.label(b))
                     continue
-                pshot, box, lab = self.shot(page, f"{b}_back"), back["box"], back["label"] or "the slide's back button"
+                pshot, box, lab = self.shot(page, f"{b}_back"), back["box"], back["label"] or "Back arrow on the screen"
                 before = self._sig(st)
                 self.click_box(page, back["box"])
             st2 = self.settle(page)
@@ -1317,11 +1459,16 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             name = f"“{lab}”" if lab else "Prev button"
             if new == b:
                 self.col.add("navigation", "error", f"{name} did not move back" if lab else "Prev button did not move back",
-                             slide_id=b, slide_label=self.label(b), screenshot=pshot, box=box, vw=1366)
+                             slide_id=b, slide_label=self.label(b), screenshot=pshot, box=box, vw=1366, found_in="Navigation",
+                             detail=f"Clicked the {'“' + lab + '” (Back)' if lab else 'player Back (PREV)'} button on {self.label(b)}.\n"
+                                    f"Expected: {self.label(a)} opens.\nResult: the screen did not change.",
+                             fix=f"Make this Back button open {self.label(a)}.")
             elif new != a and not new.startswith("unknown") and not (slide and slide.prev_target == new):
                 self.col.add("navigation", "warning", "Prev went to a different slide than the one before it",
                              slide_id=b, slide_label=self.label(b), screenshot=pshot, box=box, vw=1366,
-                             detail=f"Expected {self.label(a)}, got {self.label(new)}")
+                             detail=f"Clicked the {'“' + lab + '” (Back)' if lab else 'player Back (PREV)'} button on {self.label(b)}.\n"
+                                    f"Expected {self.label(a)}, got {self.label(new)}",
+                             fix=f"Make this Back button open {self.label(a)}.")
             else:
                 self.col.ran("navigation")
 
@@ -1361,7 +1508,52 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
         if o:
             return o
         n = next((n for n in self._text_nodes(page) if self.MENU_WORD.match(n["t"])), None)
-        return self._as_obj(n["t"], n["b"]) if n else None
+        if n:
+            return self._as_obj(n["t"], n["b"])
+        return self._icon_menu_button(page)
+
+    def _menu_links(self, slide):
+        """Topic links of a course menu built into the screens: buttons on the slide that each open a different
+        screen and carry that screen's name (usually hidden until the menu icon is clicked)."""
+        if not slide:
+            return []
+        links = [o for o in slide.nav_objects if o["label"].strip() and o["target"] in set(self.course.ids())]
+        return links if len({o["target"] for o in links}) >= 3 else []
+
+    def _icon_menu_button(self, page):
+        """A Menu button drawn as an icon with no name: the button that, when clicked, shows the screen's topic links."""
+        sid = self.identify(self.state(page))
+        slide = self.course.by_id(sid)
+        links = self._menu_links(slide)
+        if not links:
+            return None
+        cached = getattr(self, "_menu_icon_id", None)
+        if cached:
+            b = self._box_of(page, cached)
+            if b:
+                return self._as_obj("Menu", b)
+        if sum(1 for o in links if self._box_of(page, o["id"])) >= 2:
+            return None   # the topic links are already on the screen: not a pop-up menu
+        link_ids = {o["id"] for o in slide.nav_objects}
+        cands = []
+        for co in slide.click_objects:
+            if co["id"] in link_ids:
+                continue
+            b = self._box_of(page, co["id"])
+            if b and b[2] >= 12 and b[3] >= 12:
+                cands.append((co["id"], b))
+        cands.sort(key=lambda c: (c[1][1], c[1][0]))   # menu icons usually sit at the top
+        for cid, b in cands[:6]:
+            self.click_box(page, b)
+            page.wait_for_timeout(1000)
+            shown = sum(1 for o in links if self._box_of(page, o["id"]))
+            self.jump(page, sid)   # put the screen back as it was
+            self.settle_timeline(page)
+            if shown >= 2:
+                self._menu_icon_id = cid
+                self.log(f"Menu: the course menu opens from an icon on {self.label(sid)}")
+                return self._as_obj("Menu", b)
+        return None
 
     def open_custom_menu(self, page):
         """Clicks the screen's Menu button. Returns {"button", "items", "close"} or None if there is no Menu button.
@@ -1390,7 +1582,13 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                                           for s in self.course.slides if s.title)]
         if len(titled) >= 2:
             items = titled
-        return {"button": btn, "items": items, "close": close}
+        seen_l, uniq = set(), []
+        for o in items:   # the same entry can be read twice (its text and its screen-reader copy)
+            k = _norm(o.get("label"))
+            if k not in seen_l:
+                seen_l.add(k)
+                uniq.append(o)
+        return {"button": btn, "items": uniq, "close": close}
 
     def _find_custom_menu(self, page):
         """Moves through the first screens until one shows a Menu button. True if found."""
@@ -1404,11 +1602,22 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             self.settle_timeline(page)
         return bool(self._custom_menu_button(page))
 
-    def custom_menu_pass(self, page):
+    def custom_menu_pass(self, page, after_walk=False):
+        """after_walk: called in the same session right after the whole course was played with Next, so a menu that
+        unlocks topics only as the learner completes them is tested as a learner would see it."""
+        if after_walk and not any(self._menu_links(x) for x in self.course.slides):
+            return False
         if not self._find_custom_menu(page):
             self.col.skip("menu", "No course menu found: the player has no menu and no screen shows a Menu button")
             return
         home = self.identify(self.state(page))
+        if self.can_jump(page):
+            # test the menu from the last screen that has it, where every earlier topic should be open
+            with_menu = [x.id for x in self.course.slides if self._menu_links(x)]
+            if with_menu:
+                home = with_menu[-1]
+            self.jump(page, home)
+            self.settle_timeline(page)
         opened = self.open_custom_menu(page)
         shot = self.shot(page, f"{home}_custom_menu")
         btn_box = self._obox(opened["button"])
@@ -1451,6 +1660,8 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             here = self.identify(self.state(page))
             o = None   # the menu closes after each jump: always open it again from the current screen
             if not o:
+                if self.can_jump(page) and self.jump(page, home) == home:
+                    here = home   # every entry is tried from the same screen (a menu left open is closed this way too)
                 again = self.open_custom_menu(page)
                 if not again:
                     if self.goto_slide(page, home) == home:
@@ -1463,6 +1674,7 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 if not o:
                     continue
             before = self._sig(self.state(page))
+            ishot, ibox = self.shot(page, f"{here}_menuitem{idx}"), self._obox(o)   # the open menu, before the click
             self.click_box(page, self._obox(o))
             st = self.settle(page)
             got = self.identify(st, expected=sid if self._moved(before, self._sig(st)) else None)
@@ -1483,14 +1695,16 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                                         "text": st["text"], "title": st["title"], "via_menu": True,
                                         "vw": 1366, "seek_box": st.get("seekBox"), "boxes": page.evaluate(TEXTBOX_JS)}
             elif got in (here, None) or (got or "").startswith("unknown"):
-                locked.append((sid, text, here))
+                locked.append((sid, text, here, ishot, ibox))
             else:
                 self.col.add("menu", "error", "Menu item opened the wrong screen", slide_id=sid, slide_label=self.label(sid),
                              detail=f"Menu item “{text}” opened {self.label(got)}", screenshot=self.shot(page, f"{sid}_menu"), vw=1366)
-        for sid, text, here in locked:
-            if expect == "free":
-                self.col.add("menu", "error", "Menu item does not open its screen", slide_id=sid, slide_label=self.label(sid),
-                             detail=f"Clicked “{text}” in the menu on {self.label(here)}; nothing opened")
+        for sid, text, here, ishot, ibox in locked:
+            if expect == "free" or after_walk:   # after the whole course was played, every topic must open
+                self.col.add("menu", "error", "Menu item does not open its screen", slide_id=here, slide_label=self.label(here),
+                             detail=f"Clicked “{text}” in the menu on {self.label(here)} after playing the whole course; nothing opened",
+                             screenshot=ishot, box=ibox, vw=1366, found_in="Menu",
+                             fix=f"Make the “{text}” menu item open its screen.")
             else:
                 self.col.add("menu", "info", "Menu item did not open (menu is locked until the screen is visited)",
                              slide_id=sid, slide_label=self.label(sid), detail=f"“{text}”")
@@ -1504,6 +1718,9 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
         page = self.open(ctx, "menu")
         items = self.ensure_menu(page)
         self.has_menu = bool(items)
+        if not items and self.menu_done:
+            ctx.close()
+            return
         if not items:
             # no player menu: the course may have its own Menu button on the screens
             try:
@@ -1625,10 +1842,12 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             self.settle_timeline(page)
             for d in (s.dead_click_objects if s else []):
                 # a click trigger with no action matters only on something the learner can see
-                b = self._box_of(page, d["id"]) if isinstance(d, dict) else None
-                if b:
+                b = self._visible_box(page, d["id"]) if isinstance(d, dict) else None
+                arrow = self._arrow_name(page, s, b) if b else None
+                last = s and s.index >= len(self.course.slides)
+                if b and not (sid in self.dead_back and arrow == "Back arrow") and not (last and arrow == "Next arrow"):
                     self.col.add("buttons", "error", "Object has a click trigger with no action", slide_id=sid,
-                                 slide_label=self.label(sid), detail=d.get("label") or "", box=b, vw=1366,
+                                 slide_label=self.label(sid), detail=arrow or d.get("label") or "", box=b, vw=1366,
                                  screenshot=self.shot(page, f"{sid}_dead{len(self.col.findings)}"))
             seen_overlap = set()
             self._overlap_check(page, sid, "", seen_overlap)
@@ -1642,7 +1861,7 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 for co in s.click_objects:
                     if co["id"] in nav_ids:
                         continue
-                    b = self._box_of(page, co["id"])
+                    b = self._visible_box(page, co["id"])   # only what a learner can see (not under a layer)
                     if b and not any(inside({"x": b[0] + b[2] / 2, "y": b[1] + b[3] / 2}, nb) for nb in nav_boxes):
                         objs.append(self._as_obj(co["label"] or "", b))
                 objs = objs[: self.max_buttons]
@@ -1660,9 +1879,25 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                             o = min(now, key=lambda c: abs(c["y"] - o["y"]) + abs(c["x"] - o["x"]))
                     except Exception:
                         pass
+                lab = o.get("label") or ""
+                if not lab or re.match(r"^(DIV|SPAN|SVG|G|IMG|PATH|CANVAS|BUTTON|A)$", lab) or re.match(r"^(?=.*\d)(?=.*[A-Za-z])[0-9A-Za-z]{11}$", lab):
+                    lab = self._arrow_name(page, s, [o["x"] - o["w"] / 2, o["y"] - o["h"] / 2, o["w"], o["h"]]) or f"item {k + 1} (no name)"
+                if lab == "Back arrow" and sid in self.dead_back:
+                    continue   # already reported as "Back button not working"
+                if not self._on_top(page, o) and self.can_jump(page):
+                    # something opened earlier still covers this item: open the screen again so it can be clicked
+                    self.jump(page, sid)
+                    self.settle_timeline(page)
+                    if o.get("label"):
+                        now = [c for c in self._clickables(page) if c.get("label") == o["label"]]
+                        if now:
+                            o = min(now, key=lambda c: abs(c["y"] - o["y"]) + abs(c["x"] - o["x"]))
+                    if not self._on_top(page, o):
+                        continue   # not visible to a learner here: not tested
                 base, noise = self.fp_baseline(page)
                 oshot = self.shot(page, f"{sid}_btn{k}")
                 words0 = self._words(page)
+                self._shot_words = {oshot: self._seen_words(page)}
                 n_pages = len(ctx.pages)
                 try:
                     page.mouse.click(o["x"], o["y"])
@@ -1674,9 +1909,10 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                     page.wait_for_timeout(800)
                     changed = self._pixels_changed(oshot, page)
                 box = [o["x"] - o["w"] / 2, o["y"] - o["h"] / 2, o["w"], o["h"]]
-                lab = o.get("label") or ""
-                if not lab or re.match(r"^(DIV|SPAN|SVG|G|IMG|PATH|CANVAS|BUTTON|A)$", lab) or re.match(r"^(?=.*\d)(?=.*[A-Za-z])[0-9A-Za-z]{11}$", lab):
-                    lab = f"item {k + 1} (no name)"
+                if changed and lab.startswith("item ") and len(ctx.pages) == n_pages:
+                    title = self._popup_title(page, words0)
+                    if title:
+                        lab = f"{title} icon"
                 item = {"label": lab, "opened": bool(changed), "closed": None,
                         "shot": oshot, "box": box, "new_window": len(ctx.pages) != n_pages}
                 items.append(item)
@@ -1726,9 +1962,46 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
 
     CLOSE_RE = re.compile(r"^\s*(close|close (window|pop-?up|layer)|x|×|✕|✖|╳|done)\s*$", re.I)
 
+    def _popup_title(self, page, before_words):
+        """The heading of what a click opened (e.g. "Menu", "Help", "Exit"): the top-most new piece of text."""
+        try:
+            new = [n for n in self._text_nodes(page)
+                   if set(re.findall(r"[a-z0-9']{3,}", n["t"].lower())) - (before_words or set()) and len(n["t"]) <= 40]
+        except Exception:
+            return None
+        if not new:
+            return None
+        n = min(new, key=lambda n: (round(n["b"][1] / 10), n["b"][0]))
+        return n["t"].strip()[:30]
+
+    def _on_top(self, page, o):
+        """True when nothing covers the item at its centre (what a learner would click)."""
+        try:
+            return bool(page.evaluate("""([x, y, w, h]) => {
+                const t = document.elementFromPoint(x, y); if (!t) return false;
+                const r = t.getBoundingClientRect();
+                // the element under the pointer must lie around the item, not be a big cover over it
+                return r.width <= Math.max(w * 3, 60) + 40 || r.height <= Math.max(h * 3, 60) + 40 ||
+                       !!t.closest('[data-acc-type], [role="button"], button, a'); }""", [o["x"], o["y"], o["w"], o["h"]]))
+        except Exception:
+            return True
+
     def _words(self, page):
-        st = self.state(page)
-        return set(re.findall(r"[a-z0-9']{3,}", (st.get("text", "") + " " + st.get("acc", "")).lower()))
+        """Words a learner can see now (hidden screen-reader copies of closed layers are left out)."""
+        return set(re.findall(r"[a-z0-9']{3,}", " ".join(n["t"] for n in self._text_nodes(page)).lower()))
+
+    def _seen_words(self, page, shot_rel=None):
+        """Words a learner can see right now (visible text boxes only, never hidden layers' copies).
+        With shot_rel: the words recorded with that screenshot instead (the screen before the click)."""
+        if shot_rel:
+            tb = getattr(self, "_shot_words", {}).get(shot_rel)
+            if tb is not None:
+                return tb
+        try:
+            tb = page.evaluate(TEXTBOX_JS)
+        except Exception:
+            return set()
+        return set(re.findall(r"[a-z0-9']{3,}", " ".join(n["t"] for n in tb.get("nodes", [])).lower()))
 
     def _close_popup(self, page, before_rel, before_words=None):
         """Closes what a click opened. True = the screen is as before again, False = it stays open,
@@ -1747,15 +2020,23 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                         target = self._as_obj("Close", [bb["x"], bb["y"], bb["width"], bb["height"]])
             except Exception:
                 pass
+        if target is None:   # an unnamed close icon: the course data says which buttons close a pop-up
+            slide = self.course.by_id(self.current) if self.current else None
+            for cid in (getattr(slide, "close_objects", None) or []):
+                b = self._visible_box(page, cid)
+                if b:
+                    target = self._as_obj("Close", b)
+                    break
         if target is None:
             return None
-        opened = self._words(page) - (before_words or set())
+        seen_before = self._seen_words(page, before_rel)
+        opened = self._seen_words(page) - seen_before
 
         def gone():
-            if opened and before_words is not None:   # the words the pop-up showed must disappear again
-                left = opened & self._words(page)
+            if opened:   # the words the pop-up showed must no longer be visible
+                left = opened & self._seen_words(page)
                 return len(left) <= 0.3 * len(opened)
-            return not self._pixels_changed(before_rel, page)
+            return not self._pixels_changed(before_rel, page, min_share=0.03)
         page.mouse.click(target["x"], target["y"])
         page.wait_for_timeout(900)
         if gone():
@@ -1871,6 +2152,17 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                     return True
             return False
 
+        vw = page.viewport_size["width"]
+        sw = self.swipes = {}
+
+        def fwd_target(sid, slide):
+            k = self.order.index(sid) if sid in self.order else -1
+            return self.order[k + 1] if 0 <= k < len(self.order) - 1 else (slide.next_target if slide else "")
+
+        def back_target(sid, slide):
+            k = self.order.index(sid) if sid in self.order else -1
+            return self.order[k - 1] if k > 0 else (slide.prev_target if slide else "")
+
         for _ in range(max(n * 2, 10)):
             self.check_time()
             st = self.state(page)
@@ -1886,90 +2178,118 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             self.log(f"Mobile: {lab}")
             self.tick("mobile", len(seen) - 1, n)
             slide = self.course.by_id(sid)
-            if is_welcome(slide) and (not st["nextExists"] or st["nextDisabled"]):
-                # welcome screen moved on with START: nothing to swipe-test here
+            rec = sw.setdefault(sid, {"next": "Not tested", "back": "Not tested"})
+            last = bool(slide) and slide.index >= n
+            if self.no_nav_expected(slide):
+                # welcome (START) and assessment screens: no Back / Next, so no swipe test
+                rec["next"] = rec["back"] = "N/A"
                 self.play_slide(page, sid)
+                if slide and slide.id in self.quiz_ids:
+                    new = self.answer_question(page, sid, 0)
+                    if new and new != sid:
+                        continue
                 if not self.advance(page, sid, tap=True):
-                    if not onward(sid, "START did not open the next screen"):
+                    if last or not onward(sid, "the screen's own button did not open the next screen"):
                         break
                 continue
-            # 1. while Next is locked, swipe left must not move
-            if st["nextExists"] and st["nextDisabled"]:
-                before = self.shot(page, f"{sid}_swipe_locked")  # the screen as it was, Next still locked
-                new, _ = self.touch_swipe(page, cdp, "left", retry=False)
-                if new != sid:
-                    self.col.add("swipe", "error", "Swipe left moved to the next slide while Next was locked",
-                                 slide_id=sid, slide_label=lab, detail=f"Moved to {self.label(new)}",
-                                 screenshot=before, box=st.get("nextBox"), vw=page.viewport_size["width"])
-                    self.goto_slide(page, sid, tap=True)
-                else:
-                    self.col.ran("swipe")
-            # 2. while Prev is locked, swipe right must not move
-            if st["prevExists"] and st["prevDisabled"]:
-                new, _ = self.touch_swipe(page, cdp, "right", retry=False)
-                if new != sid:
-                    self.col.add("swipe", "error", "Swipe right moved back while Prev was locked",
-                                 slide_id=sid, slide_label=lab, detail=f"Moved to {self.label(new)}")
-                    self.goto_slide(page, sid, tap=True)
-            st = self.play_slide(page, sid)
-            if slide and slide.is_quiz and st["nextDisabled"]:
-                self.try_quiz(page)
-                st = self.state(page)
-            if not st["nextExists"]:
-                # the player shows no Next: the slide has its own buttons, so swiping should not skip ahead
+            # 1. before the screen has finished, the way forward is locked: swipe next must not move
+            locked = (st["nextExists"] and st["nextDisabled"]) or (not st["nextExists"] and not self.slide_nav(page, slide, "forward"))
+            if locked and not last:
+                before = self.shot(page, f"{sid}_swipe_locked")
                 new, _ = self.touch_swipe(page, cdp, "left", retry=False)
                 if new != sid and not new.startswith("unknown"):
-                    self.col.add("swipe", "warning", "Swipe moved to another slide although the player shows no Next button",
-                                 slide_id=sid, slide_label=lab, detail=f"Moved to {self.label(new)}",
-                                 screenshot=self.shot(page, f"{sid}_swipe_custom"), vw=page.viewport_size["width"])
-                    continue
-                self.col.ran("swipe")
-                if not self.advance(page, sid, tap=True):
-                    if slide and slide.next_target and self.goto_slide(page, slide.next_target, tap=True) == slide.next_target:
-                        continue
-                    if not onward(sid, "the screen's own button did not open the next screen"):
+                    rec["next"] = "Fail – moves on while Next is locked"
+                    self.col.add("swipe", "error", "Swipe next (left) moves on while Next is locked",
+                                 slide_id=sid, slide_label=lab, detail=f"Moved to {self.label(new)} before the screen finished",
+                                 screenshot=before, box=st.get("nextBox"), vw=vw)
+                    self.goto_slide(page, sid, tap=True)
+            st = self.play_slide(page, sid)
+            # 2. swipe previous (right): goes back when Back is available, stays when it is not
+            prev_nav = st["prevExists"] and not st["prevDisabled"]
+            # the screen's own Back button – also a Back arrow that is there but broken (that is reported as a Back issue)
+            custom_back = None if st["prevExists"] else (self.slide_nav(page, slide, "back") or self._dead_back(page, slide))
+            want_back = back_target(sid, slide)
+            if want_back and not (slide and slide.index == 1):
+                shot_b = self.shot(page, f"{sid}_swipe_prev")
+                back, _ = self.touch_swipe(page, cdp, "right", retry=True)
+                moved = back != sid and not back.startswith("unknown")
+                if prev_nav:
+                    if not moved:
+                        rec["back"] = "Fail – does not go back"
+                        self.col.add("swipe", "error", "Swipe previous (right) does not go back (the Back button works)",
+                                     slide_id=sid, slide_label=lab, screenshot=shot_b, vw=vw,
+                                     detail=f"Swiped right on {lab}. Expected: {self.label(want_back)}. Result: stayed on the same screen.")
+                    elif back != want_back:
+                        rec["back"] = "Fail – opens the wrong screen"
+                        self.col.add("swipe", "error", "Swipe previous (right) opens the wrong screen", slide_id=sid, slide_label=lab,
+                                     screenshot=shot_b, vw=vw, detail=f"Expected {self.label(want_back)}, got {self.label(back)}")
+                    else:
+                        rec["back"] = "Pass – goes back"
+                        self.col.ran("swipe")
+                elif custom_back:
+                    # the screen's own Back button: swiping is a player feature, so it may or may not move
+                    rec["back"] = ("Pass – goes back" if back == want_back else
+                                   "Not available (custom Back button)" if not moved else "Fail – opens the wrong screen")
+                    if moved and back != want_back:
+                        self.col.add("swipe", "error", "Swipe previous (right) opens the wrong screen", slide_id=sid, slide_label=lab,
+                                     screenshot=shot_b, vw=vw, detail=f"Expected {self.label(want_back)}, got {self.label(back)}")
+                else:
+                    if moved and st["prevExists"]:   # the player's Back is there but locked
+                        rec["back"] = "Fail – goes back although Back is locked"
+                        self.col.add("swipe", "error", "Swipe previous (right) goes back although Back is locked", slide_id=sid,
+                                     slide_label=lab, screenshot=shot_b, vw=vw, detail=f"Moved to {self.label(back)}")
+                    elif moved:
+                        rec["back"] = "Goes back (the screen has no Back button)"
+                    else:
+                        rec["back"] = "Pass – stays (Back is locked)"
+                if moved and self.goto_slide(page, sid, tap=True) != sid:
+                    if not onward(sid, "could not come back after swiping back"):
                         break
+                    continue
+                st = self.state(page)
+            else:
+                rec["back"] = "N/A"
+            # 3. swipe next (left) after the screen finished
+            want = fwd_target(sid, slide)
+            if last or not want:
+                rec["next"] = "N/A" if rec["next"] == "Not tested" else rec["next"]
+                break
+            player_next = st["nextExists"] and not st["nextDisabled"]
+            custom_next = None if st["nextExists"] else self.slide_nav(page, slide, "forward")
+            shot_n = self.shot(page, f"{sid}_swipe_next")
+            new, _ = self.touch_swipe(page, cdp, "left", retry=True)
+            moved = new != sid and not new.startswith("unknown")
+            if moved and new != want and not (slide and slide.has_interaction):
+                if rec["next"] == "Not tested":
+                    rec["next"] = "Fail – opens the wrong screen"
+                self.col.add("swipe", "error", "Swipe next (left) opens the wrong screen", slide_id=sid, slide_label=lab,
+                             screenshot=shot_n, vw=vw, detail=f"Expected {self.label(want)}, got {self.label(new)}")
+            elif moved:
+                if rec["next"] == "Not tested":
+                    rec["next"] = "Pass – goes to the next screen"
+                self.col.ran("swipe")
+            if moved:
                 continue
-            if st["nextDisabled"]:
-                if slide and slide.index < n and slide.next_target:
-                    if self.goto_slide(page, slide.next_target, tap=True) == slide.next_target:
-                        continue
-                if not onward(sid, "NEXT stayed locked after the screen finished"):
-                    break
-                continue
-            # 3. Next enabled: swipe left must go forward
-            new, st2 = self.touch_swipe(page, cdp, "left")
-            if new == sid:
-                swipe_shot = self.shot(page, f"{sid}_swipe_next")
+            if player_next:
+                # Next works here, so swiping should too (unless Next itself does not move: then it is not a swipe issue)
                 before = self._sig(self.state(page))
                 self.click_first(page, SEL["next"])
                 st2 = self.settle(page)
-                new = self.identify(st2, expected=(slide.next_target if slide else None) if self._moved(before, self._sig(st2)) else None)
-                if new != sid:   # Next works here, so swiping should too
-                    self.col.add("swipe", "error", "Swipe left did not go to the next slide (Next is enabled)",
-                                 slide_id=sid, slide_label=lab, screenshot=swipe_shot, vw=page.viewport_size["width"])
+                new = self.identify(st2, expected=want if self._moved(before, self._sig(st2)) else None)
+                if new != sid:
+                    if rec["next"] == "Not tested":
+                        rec["next"] = "Fail – does not go to the next screen"
+                    self.col.add("swipe", "error", "Swipe next (left) does not go to the next screen (the Next button works)",
+                                 slide_id=sid, slide_label=lab, screenshot=shot_n, vw=vw,
+                                 detail=f"Swiped left on {lab}. Expected: {self.label(want)}. Result: stayed on the same screen.")
                     continue
-                # Next does not move on either (a branching or activity screen): not a swipe problem, carry on
+            elif rec["next"] == "Not tested":
+                rec["next"] = "Not available (custom Next button)" if custom_next else "Pass – stays (no way forward yet)"
+            if not self.advance(page, sid, tap=True):
                 if slide and slide.next_target and self.goto_slide(page, slide.next_target, tap=True) == slide.next_target:
                     continue
-                if not onward(sid, "NEXT did not open the next screen"):
+                if not onward(sid, "the way forward did not open the next screen"):
                     break
-                continue
-            self.col.ran("swipe")
-            # 4. on the new slide, swipe right must go back when Prev is enabled
-            if st2["prevExists"] and not st2["prevDisabled"]:
-                back, _ = self.touch_swipe(page, cdp, "right")
-                if back == new:
-                    self.col.add("swipe", "error", "Swipe right did not go back (Prev is enabled)",
-                                 slide_id=new, slide_label=self.label(new), screenshot=self.shot(page, f"{new}_swipe_prev"), vw=page.viewport_size["width"])
-                else:
-                    if back != sid:
-                        self.col.add("swipe", "warning", "Swipe right went to an unexpected slide",
-                                     slide_id=new, slide_label=self.label(new), detail=f"Went to {self.label(back)}")
-                    # return to the new slide
-                    if self.goto_slide(page, new, tap=True) != new:
-                        self.click_first(page, SEL["next"])
-                        self.settle(page)
         # say plainly what the phone pass could not cover, instead of leaving the check blank
         missed = [i for i in ids if i not in seen]
         if missed:

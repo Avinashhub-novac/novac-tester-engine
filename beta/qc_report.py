@@ -448,8 +448,8 @@ def _nav_sheet(wb, res, run_dir):
     ws = wb.create_sheet("Navigation Test")
     rows = res.get("nav_table") or []
     blocked = res.get("blocked")
-    sub = ("Each screen was opened like a learner: Next (or START / Submit), Back, the menu, and every clickable "
-           "item opened and closed.")
+    sub = ("Each screen was opened like a learner: Next (or START / Submit), Back, the menu, every clickable "
+           "item opened and closed, and on a phone: swipe left (next) and swipe right (previous).")
     if blocked:
         sub += f" TESTING STOPPED at screen “{next((r['label'] for r in rows if r['sid'] == blocked['sid']), '')}”: {blocked['reason']}."
     _title(ws, "Navigation Test", sub)
@@ -460,19 +460,19 @@ def _nav_sheet(wb, res, run_dir):
     ws["A3"] = f"Screens: {len(rows)}   ·   Pass: {passed}   ·   Fail: {failed}   ·   Not tested: {len(rows) - passed - failed}"
     ws["A3"].font = Font(bold=True)
     names = ["Screen No", "Screen title", "Screenshot", "Reached by Next", "Next / forward", "Back", "Menu",
-             "Clickables (open & close)", "Result", "Notes"]
-    widths = [10, 26, 47, 14, 14, 12, 12, 22, 14, 44]
+             "Clickables (open & close)", "Swipe next (phone)", "Swipe previous (phone)", "Result", "Notes"]
+    widths = [10, 26, 47, 14, 14, 12, 12, 22, 18, 18, 14, 44]
     _header(ws, 5, names, widths)
     slides = {s["id"]: s for s in res.get("slides", [])}
     r = 6
     for row in rows:
         vals = [row["index"], row["title"], "", row["reached"], row["next"], row["back"], row["menu"], row["clicks"],
-                row["result"], row["notes"]]
+                row.get("swipe_next", "—"), row.get("swipe_back", "—"), row["result"], row["notes"]]
         for j, v in enumerate(vals, 1):
             c = ws.cell(r, j, v)
-            c.alignment = Alignment(wrap_text=True, vertical="top", horizontal="center" if j not in (2, 10) else None)
+            c.alignment = Alignment(wrap_text=True, vertical="top", horizontal="center" if j not in (2, 12) else None)
             c.border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
-            if j in (4, 5, 6, 7, 8, 9):
+            if j in (4, 5, 6, 7, 8, 9, 10, 11):
                 _result_cell(c)
         img_h = 0
         th = _thumb(run_dir, (slides.get(row["sid"]) or {}).get("shot", ""), 330)

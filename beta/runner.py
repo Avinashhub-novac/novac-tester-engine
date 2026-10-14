@@ -146,6 +146,7 @@ class Run:
         self.prog.set_plan(plan_scorm(course.slides, passes, opts.get("play_full", True),
                                       bool(self.meta.get("storyboard")), opts.get("transcript", True)))
         crawler.on_progress = self.prog.tick
+        crawler.run_menu = "menu" in passes
         visits = crawler.run(passes)
         self.prog.phase("analyse")
         self.crawler, self.passes = crawler, passes
@@ -304,9 +305,11 @@ class Run:
         if crawler.blocked:   # only the screens the learner can reach
             reach = set(crawler.order)
             seq = [x for x in seq if x[0] in reach]
-        from .crawler import is_welcome
+        from .crawler import is_welcome, is_end
+        n_all = len(course.slides)
         textcheck.check_screen_numbers(seq, self.col, assess=crawler.assess_ids, results=crawler.results_ids,
-                                       welcome={s.id for s in course.slides if is_welcome(s)}, partial=bool(crawler.blocked))
+                                       welcome={s.id for s in course.slides if is_welcome(s) or is_end(s, n_all)},
+                                       partial=bool(crawler.blocked))
 
         slides = self.slide_list(course, visits, crawler)
         self.finish(slides, {"course_title": course.title, "slide_count": len(course.slides),
@@ -367,14 +370,20 @@ class Run:
                    "reached": "Not tested (testing stopped)" if after_stop else ("Yes" if reached else ("No – opened directly" if v.get("via_jump") else "No")),
                    "next": res(next_f, reached or k == 0, na=last and not next_f),
                    "back": res(back_f, "prev" in passes and not crawler.blocked, na=(no_nav or k == 0) and not back_f),
-                   "menu": res(menu_f, "menu" in passes and not crawler.blocked),
+                   "menu": res(menu_f, "menu" in passes and not crawler.blocked) if not (
+                       "menu" in self.col.checks_skipped and not menu_f and not after_stop) else
+                       ("No menu found" if self.col.checks_skipped["menu"].startswith("No course menu") else "Not tested"),
+                   "swipe_next": nt if after_stop else (getattr(crawler, "swipes", {}).get(s.id, {}).get("next")
+                                  or ("Not tested" if "mobile" in passes else "Not in this stage")),
+                   "swipe_back": nt if after_stop else (getattr(crawler, "swipes", {}).get(s.id, {}).get("back")
+                                  or ("Not tested" if "mobile" in passes else "Not in this stage")),
                    "clicks": clicks,
                    "notes": "; ".join(dict.fromkeys(plain(f.message)[0] for f in fs))[:600] + (("; " if fs else "") + v["note"] if v.get("note") else "")}
             if is_welcome(s):
                 row["notes"] = (row["notes"] + "; " if row["notes"] else "") + "Welcome screen: no Back/Next expected (START moves on)"
             if s.id in crawler.quiz_ids or s.id in crawler.results_ids:
                 row["notes"] = (row["notes"] + "; " if row["notes"] else "") + "Assessment screen: no Back/Next expected"
-            vals = [row["next"], row["back"], row["menu"], row["clicks"]]
+            vals = [row["next"], row["back"], row["menu"], row["clicks"], row["swipe_next"], row["swipe_back"]]
             row["result"] = ("Not tested" if after_stop else "Fail" if any(str(x).startswith("Fail") for x in vals)
                              else "Pass")
             if crawler.blocked and crawler.blocked["sid"] == s.id:
