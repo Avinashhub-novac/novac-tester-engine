@@ -224,6 +224,28 @@ TEXTBOX_JS = r"""
       if (w.width > 0) words.push({ w: m[0], n, b: [w.x, w.y, w.width, w.height] });
     }
   }
+  // Storyline often draws text as graphics; its screen-reader copy sits invisibly over each text box.
+  // Use those boxes (whole text box, not single words) so issues can still be outlined in the right place.
+  const seenAcc = new Set();
+  document.querySelectorAll('.acc-shadow-el, [class*="acc-shadow"] [data-acc-text], [data-acc-text]').forEach(el => {
+    if (out.length >= 800) return;
+    const t = (el.getAttribute('data-acc-text') || el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!t || t.length > 1500) return;
+    const s = getComputedStyle(el);
+    if (s.display === 'none' || s.visibility === 'hidden') return;
+    let hidden = false;
+    for (let p = el.parentElement; p && p !== document.body; p = p.parentElement) {
+      const ps = getComputedStyle(p);
+      if (ps.display === 'none' || ps.visibility === 'hidden') { hidden = true; break; }
+    }
+    if (hidden) return;
+    const r = el.getBoundingClientRect();
+    if (r.width < 4 || r.height < 4 || r.right < 0 || r.bottom < 0 || r.left > innerWidth || r.top > innerHeight) return;
+    if (r.width > innerWidth * 0.98 && r.height > innerHeight * 0.9) return;   // the whole slide, not a text box
+    const k = t + '|' + Math.round(r.x) + ',' + Math.round(r.y);
+    if (seenAcc.has(k)) return; seenAcc.add(k);
+    out.push({ t: t.slice(0, 600), b: [r.x, r.y, r.width, r.height], acc: true });
+  });
   return { nodes: out, words };
 }
 """

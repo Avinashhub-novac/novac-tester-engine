@@ -1275,22 +1275,57 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
         except Exception:
             return []
 
+    @staticmethod
+    def _as_obj(label, b):
+        return {"label": label, "x": b[0] + b[2] / 2, "y": b[1] + b[3] / 2, "w": b[2], "h": b[3]}
+
+    def _text_nodes(self, page):
+        try:
+            tb = page.evaluate(TEXTBOX_JS)
+        except Exception:
+            return []
+        return [n for n in tb.get("nodes", []) if n.get("t") and n["b"][2] > 2 and n["b"][3] > 2]
+
     def _custom_menu_button(self, page):
-        return next((o for o in self._clickables(page) if self.MENU_WORD.match(o.get("label") or "")), None)
+        """The course's Menu button: from the published course data (most reliable), else a clickable or a piece of
+        text on the screen that reads "Menu"."""
+        for mid in getattr(self.course, "menu_ids", []) or []:
+            b = self._box_of(page, mid)
+            if b:
+                return self._as_obj("Menu", b)
+        o = next((o for o in self._clickables(page) if self.MENU_WORD.match(o.get("label") or "")), None)
+        if o:
+            return o
+        n = next((n for n in self._text_nodes(page) if self.MENU_WORD.match(n["t"])), None)
+        return self._as_obj(n["t"], n["b"]) if n else None
 
     def open_custom_menu(self, page):
-        """Clicks the screen's Menu button. Returns {"button", "items", "close"} or None if there is no Menu button."""
+        """Clicks the screen's Menu button. Returns {"button", "items", "close"} or None if there is no Menu button.
+        Menu entries are the pieces of text (and clickables) that appear when the menu opens."""
         btn = self._custom_menu_button(page)
         if not btn:
             return None
         key = lambda o: (round(o["x"] / 6), round(o["y"] / 6), (o.get("label") or "").lower())
-        before = {key(o) for o in self._clickables(page)}
+        before_c = {key(o) for o in self._clickables(page)}
+        before_t = {(_norm(n["t"]), round(n["b"][0] / 6), round(n["b"][1] / 6)) for n in self._text_nodes(page)}
         self.click_box(page, self._obox(btn))
-        page.wait_for_timeout(1300)
-        new = [o for o in self._clickables(page) if key(o) not in before]
+        page.wait_for_timeout(1500)
+        new = [o for o in self._clickables(page) if key(o) not in before_c]
+        for n in self._text_nodes(page):
+            if (_norm(n["t"]), round(n["b"][0] / 6), round(n["b"][1] / 6)) in before_t:
+                continue
+            o = self._as_obj(n["t"], n["b"])
+            if not any(abs(o["x"] - x["x"]) < 8 and abs(o["y"] - x["y"]) < 8 for x in new):
+                new.append(o)
         close = next((o for o in new if self.CLOSE_WORD.match(o.get("label") or "")), None)
         items = [o for o in new if o is not close and not self.MENU_WORD.match(o.get("label") or "")
-                 and (o.get("label") or "").strip()]
+                 and len((o.get("label") or "").strip()) >= 3]
+        # keep only entries that read like screen titles when the menu also shows other text (headings, hints)
+        titled = [o for o in items if any(_norm(o["label"]) == _norm(s.title) or
+                                          (len(_norm(o["label"])) > 8 and _norm(o["label"]) in _norm(s.title))
+                                          for s in self.course.slides if s.title)]
+        if len(titled) >= 2:
+            items = titled
         return {"button": btn, "items": items, "close": close}
 
     def _find_custom_menu(self, page):
@@ -1334,7 +1369,7 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
         if opened["close"]:
             self.click_box(page, self._obox(opened["close"]))
             page.wait_for_timeout(900)
-            labels = {(o.get("label") or "") for o in self._clickables(page)}
+            labels = {(o.get("label") or "") for o in self._clickables(page)} | {n["t"] for n in self._text_nodes(page)}
             if sum(1 for it in items if it["text"] in labels) >= max(1, len(items) // 2):
                 self.col.add("menu", "error", "Close button does not close the menu", slide_id=home,
                              slide_label=self.label(home), screenshot=self.shot(page, f"{home}_menu_close"),
@@ -1350,7 +1385,7 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             self.current = sid
             text = items[idx]["text"]
             here = self.identify(self.state(page))
-            o = next((x for x in self._clickables(page) if (x.get("label") or "") == text), None)
+            o = None   # the menu closes after each jump: always open it again from the current screen
             if not o:
                 again = self.open_custom_menu(page)
                 if not again:
@@ -1367,6 +1402,13 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             self.click_box(page, self._obox(o))
             st = self.settle(page)
             got = self.identify(st, expected=sid if self._moved(before, self._sig(st)) else None)
+            if got in (here, None) or (got or "").startswith("unknown"):
+                # nothing opened (a locked entry): close the menu so the next round starts from a closed menu
+                if again.get("close"):
+                    self.click_box(page, self._obox(again["close"]))
+                else:
+                    page.keyboard.press("Escape")
+                page.wait_for_timeout(700)
             self.log(f"Menu: “{text}” -> {self.label(got)}")
             self.tick("menu", idx + 1, max(1, len(mapping)))
             if got == sid:
@@ -1506,6 +1548,7 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
 
         # slide objects
         targets = [sid for sid in self.order if not sid.startswith("unknown")] or self.course.ids()
+        found_objs = 0
         for k_t, sid in enumerate(targets):
             self.check_time()
             self.tick("buttons", k_t, len(targets))
@@ -1522,6 +1565,18 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             nav_boxes = [b for b in (self._box_of(page, o["id"]) for o in (s.nav_objects if s else [])) if b]
             inside = lambda o, b: b[0] <= o["x"] <= b[0] + b[2] and b[1] <= o["y"] <= b[1] + b[3]
             objs = [o for o in page.evaluate(CLICKABLES_JS, SEL) if not any(inside(o, b) for b in nav_boxes)][: self.max_buttons]
+            if not objs and s:
+                # the page gives no clickable hints (common in newer Storyline output): use the course's own list of
+                # objects with click triggers, found on screen by their id
+                nav_ids = {o["id"] for o in s.nav_objects} | set(getattr(self.course, "menu_ids", []) or [])
+                for co in s.click_objects:
+                    if co["id"] in nav_ids:
+                        continue
+                    b = self._box_of(page, co["id"])
+                    if b and not any(inside({"x": b[0] + b[2] / 2, "y": b[1] + b[3] / 2}, nb) for nb in nav_boxes):
+                        objs.append(self._as_obj(co["label"] or "", b))
+                objs = objs[: self.max_buttons]
+            found_objs += len(objs)
             self.log(f"Buttons: {self.label(sid)} – {len(objs)} clickable objects")
             for k, o in enumerate(objs):
                 self.check_time()
@@ -1570,6 +1625,11 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             # on to the next slide without the menu: go forward like a learner
             if not self.has_menu:
                 self.advance(page, sid)
+        if targets and found_objs == 0:
+            # say so plainly: a "pass" here would only mean the player's own buttons were tested
+            self.col.add("buttons", "warning", "Buttons inside the screens could not be detected, so they were not clicked",
+                         detail="Only the player's own buttons (play, volume, replay and so on) were tested. "
+                                "Check the screens' own buttons by hand for this course.")
         ctx.close()
 
     def _pixels_changed(self, before_rel, page, min_share=0.004):

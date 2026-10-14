@@ -10,8 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 PROVIDE_RE = re.compile(r"globalProvideData\(\s*'(\w+)'\s*,\s*'(.*)'\s*\)\s*;?\s*$", re.S)
-MEDIA_RE = re.compile(r"(?:story_content|mobile)/[\w\-./]+?\.(?:mp3|m4a|wav|ogg|aac)", re.I)
-VIDEO_RE = re.compile(r"(?:story_content|mobile)/[\w\-./]+?\.(?:mp4|webm|m4v)", re.I)
+MEDIA_RE = re.compile(r"[\w\-./]*?[\w\-]+\.(?:mp3|m4a|wav|ogg|aac)\b", re.I)
+VIDEO_RE = re.compile(r"[\w\-./]*?[\w\-]+\.(?:mp4|webm|m4v)\b", re.I)
 CAPTION_FILE_RE = re.compile(r"[\w\-./]+?\.(?:vtt|srt)", re.I)
 CLICK_EVENTS = {"onrelease", "onclick", "ontap", "onpress", "onrelease_outside"}
 
@@ -34,6 +34,7 @@ class Slide:
     is_quiz: bool = False
     dead_click_objects: list = field(default_factory=list)  # names of objects with click triggers but no actions
     nav_objects: list = field(default_factory=list)  # [{id, label, target}] slide buttons that jump to a slide
+    click_objects: list = field(default_factory=list)  # [{id, label}] every object with a click trigger
     raw_ok: bool = True
     object_ids: set = field(default_factory=set)   # ids of every object on the slide (shown as data-model-id)
     scene_id: str = ""
@@ -61,6 +62,7 @@ class Course:
     frame: dict = field(default_factory=dict)
     warnings: list = field(default_factory=list)
     scene_start: dict = field(default_factory=dict)   # scene id -> its first slide id
+    menu_ids: list = field(default_factory=list)       # ids of course "Menu" buttons found in the published data
     scorings: list = field(default_factory=list)      # quiz scoring settings (pass mark, quiz type)
 
     def by_id(self, sid):
@@ -258,6 +260,48 @@ def _nav_objects(slide_json, known_ids):
     return out
 
 
+MENU_LABEL = re.compile(r"^\s*(menu|course menu|main menu|contents|table of contents|toc)\s*$", re.I)
+
+
+def _label_of(d):
+    label = d.get("accText") or d.get("altText") or ""
+    if not label:
+        texts = [t for _, x in _walk(d) if isinstance(x.get("blocks"), list) for t in _block_text(x)]
+        label = " ".join(texts)[:60]
+    label = _plain(label)
+    words = label.split()
+    for n in range(1, len(words) // 2 + 1):
+        if len(words) % n == 0 and words == words[:n] * (len(words) // n):
+            return " ".join(words[:n])
+    return label
+
+
+def _menu_objects(obj):
+    """Ids of clickable objects labelled "Menu" (a course menu button designed into the screens or the master)."""
+    out = []
+    for _, d in _walk(obj):
+        evs = d.get("events")
+        if not isinstance(evs, list) or "id" not in d:
+            continue
+        if any(isinstance(ev, dict) and ev.get("kind") in CLICK_EVENTS and ev.get("actions") for ev in evs):
+            if MENU_LABEL.match(_label_of(d)):
+                out.append(str(d["id"]))
+    return out
+
+
+def _click_objects(slide_json):
+    """Every object on the slide with a click trigger that does something: [{id, label}]."""
+    out, seen = [], set()
+    for _, d in _walk(slide_json):
+        evs = d.get("events")
+        if not isinstance(evs, list) or "id" not in d or str(d["id"]) in seen:
+            continue
+        if any(isinstance(ev, dict) and ev.get("kind") in CLICK_EVENTS and ev.get("actions") for ev in evs):
+            seen.add(str(d["id"]))
+            out.append({"id": str(d["id"]), "label": _label_of(d)})
+    return out
+
+
 def _dead_clicks(slide_json):
     out = []
     for _, d in _walk(slide_json):
@@ -339,6 +383,18 @@ def load_course(extract_dir: Path) -> Course:
         if scene.get("id"):
             course.scene_start[str(scene["id"])] = start or (course.slides[-1].id if course.slides else "")
     known = set(course.ids())
+    # a Menu button can sit on the slide master: look through every data file, not only the slides
+    menu_ids = set(_menu_objects(data))
+    for extra in js_dir.glob("*.js"):
+        if extra.name in ("data.js", "frame.js") or extra.stat().st_size > 8_000_000:
+            continue
+        try:
+            _, ej = decode_provide_file(extra)
+        except Exception:
+            continue
+        if isinstance(ej, (dict, list)):
+            menu_ids |= set(_menu_objects(ej))
+    course.menu_ids = sorted(menu_ids)
     for i, s in enumerate(course.slides):
         path = root / s.url if s.url else js_dir / f"{s.id}.js"
         kind, sj = decode_provide_file(path)
@@ -357,6 +413,7 @@ def load_course(extract_dir: Path) -> Course:
         s.has_interaction = s.is_quiz or bool(sj.get("interactions")) or '"dragdrop' in raw.lower() or '"kind":"dragitem' in raw.lower()
         s.dead_click_objects = _dead_clicks(sj)
         s.nav_objects = _nav_objects(sj, known - {s.id})
+        s.click_objects = _click_objects(sj)
         s.object_ids = {str(d["id"]) for _, d in _walk(sj) if "id" in d and isinstance(d.get("id"), (str, int))} - {s.id}
     seen, shared = set(), set()
     for s in course.slides:

@@ -204,7 +204,9 @@ class Run:
             v = visits.get(s.id)
             if not v:
                 continue
-            if v.get("seek_visible") and not s.audio and not s.video:
+            heard = any(str(m).lower().endswith((".mp3", ".m4a", ".wav", ".ogg", ".aac", ".mp4", ".webm", ".m4v"))
+                        for m in v.get("media_requests") or ())
+            if v.get("seek_visible") and not s.audio and not s.video and not heard:
                 self.col.add("seekbar", "error", "Empty seekbar: the seekbar is shown but the slide has nothing to play",
                              slide_id=s.id, slide_label=s.label, screenshot=v["shot"],
                              box=v.get("seek_box"), vw=v.get("vw", 1366))
