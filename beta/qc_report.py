@@ -20,7 +20,8 @@ from copy import copy
 
 from .qc_template import TEMPLATE_B64
 
-REVIEWER = "Novac Tester (Claude)"
+REVIEWER = "eQC360 AI"
+STATUS = "In-progress"
 ISSUE_LIST = ["Transcript", "Audio", "OST", "Animation", "ARD", "Graphic", "Header", "Buttons", "Menu", "Objectives",
               "Assessment", "Assessment Strategy", "Resource", "Seek Bar", "Slide Title", "Skin", "Video", "Navigation",
               "Content Flow", "SB-Spelling", "SB-Grammar", "SB-Casing", "SB-Audio Script", "SB-OST",
@@ -34,7 +35,9 @@ CHARS_PER_LINE = 105
 def category(f):
     """Maps a finding to the template's issue categories (Description sheet)."""
     c, sev, msg = f["check"], f["severity"], f["message"].lower()
-    if c in ("assessment", "logic"):
+    if f.get("blocker"):
+        return "High"
+    if c in ("assessment", "logic", "interactivity"):
         return "High" if sev == "error" else "Medium"
     if c.startswith("sb_"):
         if f.get("found_in") == "SB-Spelling":
@@ -69,8 +72,12 @@ def issue_found_in(f):
     c, msg = f["check"], f["message"].lower()
     if c.startswith("sb_"):
         return f.get("found_in") if f.get("found_in") in ISSUE_LIST else "SB-OST"
+    if c in ("content", "restrictions", "interactivity", "assessment") and f.get("found_in") in ISSUE_LIST:
+        return f["found_in"]
     if c in ("content", "restrictions"):
-        return f.get("found_in") if f.get("found_in") in ISSUE_LIST else ("Content Flow" if c == "content" else "Navigation")
+        return "Content Flow" if c == "content" else "Navigation"
+    if c == "interactivity":
+        return "Buttons"
     if c in ("grammar", "spelling"):
         if " in slide title" in msg:
             return "Slide Title"
@@ -82,18 +89,56 @@ def issue_found_in(f):
             "video": "Video", "assessment": "Assessment", "logic": "Content Flow"}.get(c, "Navigation")
 
 
-def describe(f):
-    msg = f["message"]
+def feedback_text(f):
+    """The Feedback description, in the team's format:
+    Issue Found in / What is given / What needs to be done / Provided in SB / Provided in Output."""
+    from .wording import default_fix
+    msg = f.get("message", "")
     if msg.startswith("SB: "):
         msg = msg[4:]
-    parts = [msg.rstrip(".") + "."]
-    if f.get("detail"):
-        parts.append(f["detail"])
-    if f.get("suggestion"):
-        parts.append("Suggested fix: " + f["suggestion"])
+    given = [msg.rstrip(".") + "."]
+    for line in (f.get("detail") or "").split("\n"):
+        line = line.strip()
+        quoted = f"“{f.get('sb_says')}”" if f.get("sb_says") else None
+        if line and not re.match(r"^(SB|Course|Suggested fix)\s*:", line) and line not in given[0] and line != quoted:
+            given.append(line)
+    if f.get("mobile"):
+        given[0] = "On a phone: " + given[0]
+    fix = f.get("fix") or (f"Change it to: “{f['suggestion']}”." if f.get("suggestion") else "") or \
+        ("Correct the storyboard." if f.get("check", "").startswith("sb_") and default_fix(msg).startswith("Correct this") else default_fix(msg))
+    given = [g for g in given if g.rstrip(".") != fix.rstrip(".")] or given[:1]
+    out = [f"Issue Found in: {issue_found_in(f)}",
+           "What is given: " + "\n".join(given),
+           f"What needs to be done: {fix}"]
+    sb_related = f.get("check") == "content" or f.get("check", "").startswith("sb_") or f.get("sb_only")
+    if sb_related and f.get("sb_says"):
+        if f.get("sb_says"):
+            out.append(f"Provided in SB: “{f['sb_says']}”")
+        if f.get("check") == "content":
+            out.append(f"Provided in Output: “{f['course_says']}”" if f.get("course_says") else "Provided in Output: Not present")
     if f.get("rule"):
-        parts.append("Checklist: " + f["rule"])
-    return "\n".join(parts)
+        out.append("Checklist: " + f["rule"])
+    return "\n".join(out)
+
+
+def describe(f):
+    return feedback_text(f)
+
+
+def screen_cell(f, s, stage, is_video=False):
+    """Slide/Screen No column: "SB - 5/ Screen 6" when the issue is tied to the storyboard, else the screen number."""
+    if is_video:
+        return f.get("slide_label") or f.get("time") or "Global"
+    if stage == "sb":
+        pg = f.get("sb_page") or (s["index"] if s else "")
+        if not pg:
+            return "Global"
+        scr = f.get("sb_screen") or (s or {}).get("screen")
+        return f"SB - {pg}/ Screen {scr}" if scr else f"SB - {pg}"
+    idx = s["index"] if s and s.get("index") else None
+    if f.get("sb_page"):
+        return f"SB - {f['sb_page']}/ Screen {idx}" if idx else f"SB - {f['sb_page']}"
+    return idx if idx else "Global"
 
 
 def _lines(text):
@@ -138,6 +183,8 @@ def build(res, meta, run_dir: Path, out_path: Path, review_date=None):
 
     def key(f):
         s = slide_index.get(f.get("slide_id"))
+        if f.get("blocker"):   # the screen the learner cannot pass comes first
+            return (-1, "", 0)
         return (s["index"] if s and s.get("index") else (0 if not f.get("slide_id") else 9999),
                 f.get("time") or "", rank[category(f)])
     findings.sort(key=key)
@@ -172,23 +219,22 @@ def build(res, meta, run_dir: Path, out_path: Path, review_date=None):
         c = ws.cell(r, 2, review_date)
         c.number_format = "dd-mmm-yy"
         ws.cell(r, 3, REVIEWER)
+        ws.cell(r, 4, screen_cell(f, s, res.get("stage"), is_video))
         if is_video:
-            ws.cell(r, 4, f.get("slide_label") or f.get("time") or "Whole video")
             ws.cell(r, 5, "")
-        elif res.get("stage") == "sb":   # storyboard review: SB screen number (and page) instead of a course slide
-            pg = f.get("sb_page") or (s["index"] if s else "")
-            ws.cell(r, 4, (f"{f['sb_screen']} (p. {pg})" if f.get("sb_screen") else f"Page {pg}") if pg else "Whole SB")
-            ws.cell(r, 5, f.get("screen_title") or "")
+        elif res.get("stage") == "sb":
+            ws.cell(r, 5, f.get("screen_title") or ((s or {}).get("title") or ""))
         else:
-            ws.cell(r, 4, s["index"] if s and s.get("index") else "Course-wide")
             ws.cell(r, 5, (s.get("title") or "") if s else "")
-        text = ("MOBILE ISSUE: " if f.get("mobile") else "") + describe(f)
+        text = describe(f)
         ws.cell(r, 6, text)
         if f.get("mobile"):
             ws.cell(r, 6).font = Font(name=ws.cell(r, 6).font.name, size=ws.cell(r, 6).font.sz)
         ws.cell(r, 7, category(f))
         ws.cell(r, 8, issue_found_in(f))
-        ws.cell(r, 12, "Open")
+        if f.get("assigned_to") or res.get("stage") == "sb":   # storyboard issues go to the ID
+            ws.cell(r, 9, f.get("assigned_to") or "ID")
+        ws.cell(r, 12, STATUS)
         text_px = _lines(text) * LINE_PX + 8
         shot_rel = f.get("xl_screenshot") or f.get("screenshot")   # SB issues: course screen and SB side by side
         img_path = run_dir / shot_rel if shot_rel else None
@@ -227,7 +273,16 @@ def build(res, meta, run_dir: Path, out_path: Path, review_date=None):
         dv.add(f"{col}8:{col}{end}")
         ws.add_data_validation(dv)
     ws.freeze_panes = "A8"
-    _completion_sheet(wb, res, run_dir)
+    stage = res.get("stage") or "beta"
+    if res.get("nav_table"):
+        _nav_sheet(wb, res, run_dir)
+    if stage in ("alpha", "beta", "gold") and not is_video and res.get("nav_table") is not None:
+        _assessment_sheet(wb, res, run_dir)
+    if stage in ("beta", "gold") and not is_video:
+        _completion_sheet(wb, res, run_dir)
+    for i, name in enumerate(("Navigation Test", "Assessment Test", "LMS Completion")):   # right after the issues
+        if name in wb.sheetnames:
+            wb.move_sheet(name, offset=wb.sheetnames.index(ws.title) + 1 + i - wb.sheetnames.index(name))
     wb.active = 0
     wb.save(out_path)
     return out_path
@@ -246,13 +301,15 @@ def _place(ws, path, cell_row, width_px):
 def _completion_sheet(wb, res, run_dir):
     """'Completion Status' tab: what the course reported to the LMS, with screenshots."""
     comp = res.get("completion") or {}
-    if not comp and not res.get("restrictions"):
-        return
-    ws = wb.create_sheet("Completion Status", 1)
+    ws = wb.create_sheet("LMS Completion")
     ws.sheet_view.showGridLines = False
     ws.column_dimensions["A"].width = 34
     ws.column_dimensions["B"].width = 80
-    ws["A1"] = "Completion Status"
+    ws["A1"] = "LMS Course Completion"
+    if not comp:
+        ws["A3"] = ("Not checked: testing stopped before the last screen." if res.get("blocked")
+                    else "Not checked in this run.")
+        return
     ws["A1"].font = Font(bold=True, size=16)
     if "error" in comp:
         ws["A3"] = "Completion could not be read: " + comp["error"]
@@ -319,3 +376,188 @@ def _completion_sheet(wb, res, run_dir):
         ws.cell(row, 1, title).font = Font(bold=True, size=12)
         h = _place(ws, p, row + 1, width)
         row += 2 + -(-h // 20)  # default row ≈ 20 px
+
+
+GREEN, RED, GREY = ("E3F4EA", "1D7A46"), ("FDECEA", "B42318"), ("F1F3F5", "5D6877")
+THIN = Side(style="thin", color="C9CED6")
+
+
+def _thumb(run_dir, rel, width=520):
+    """A small JPEG copy for the workbook (full-size screenshots would make the file very large)."""
+    if not rel:
+        return None
+    src = Path(run_dir) / rel
+    if not src.exists():
+        return None
+    from PIL import Image as PILImage
+    out_dir = Path(run_dir) / "xl_thumbs"
+    out_dir.mkdir(exist_ok=True)
+    out = out_dir / (re.sub(r"[^\w-]", "_", rel) + f"_{width}.jpg")
+    if not out.exists():
+        with PILImage.open(src) as im:
+            im = im.convert("RGB")
+            im = im.resize((width * 2, round(im.height * width * 2 / im.width)))
+            im.save(out, "JPEG", quality=80, optimize=True)
+    return out
+
+
+def _put_img(ws, path, row, col, width):
+    from PIL import Image as PILImage
+    with PILImage.open(path) as im:
+        w, h = im.size
+    xl = XLImage(str(path))
+    xl.width, xl.height = width, round(h * width / w)
+    marker = AnchorMarker(col=col - 1, colOff=pixels_to_EMU(4), row=row - 1, rowOff=pixels_to_EMU(4))
+    xl.anchor = OneCellAnchor(_from=marker, ext=XDRPositiveSize2D(pixels_to_EMU(xl.width), pixels_to_EMU(xl.height)))
+    ws.add_image(xl)
+    return xl.height
+
+
+def _header(ws, row, names, widths):
+    for j, (h, w) in enumerate(zip(names, widths), 1):
+        c = ws.cell(row, j, h)
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="1F4E79")
+        c.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
+        c.border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
+        ws.column_dimensions[c.column_letter].width = w
+    ws.row_dimensions[row].height = 30
+
+
+def _result_cell(c):
+    v = str(c.value or "")
+    col = GREEN if v.startswith("Pass") or v == "Yes" else RED if v.startswith("Fail") or v.startswith("No") and v != "No clickable items" else GREY
+    if v.startswith("Pass") or v.startswith("Fail"):
+        c.font = Font(bold=True, color=col[1])
+    c.fill = PatternFill("solid", fgColor=col[0])
+
+
+def _title(ws, text, sub):
+    ws.sheet_view.showGridLines = False
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws["A1"] = text
+    ws["A1"].font = Font(bold=True, size=16)
+    ws["A2"] = sub
+    ws["A2"].font = Font(color="5D6877")
+
+
+def _nav_sheet(wb, res, run_dir):
+    """Navigation Test tab: every screen with its screenshot and the result of each navigation check."""
+    ws = wb.create_sheet("Navigation Test")
+    rows = res.get("nav_table") or []
+    blocked = res.get("blocked")
+    sub = ("Each screen was opened like a learner: Next (or START / Submit), Back, the menu, and every clickable "
+           "item opened and closed.")
+    if blocked:
+        sub += f" TESTING STOPPED at screen “{next((r['label'] for r in rows if r['sid'] == blocked['sid']), '')}”: {blocked['reason']}."
+    _title(ws, "Navigation Test", sub)
+    if blocked:
+        ws["A2"].font = Font(bold=True, color=RED[1])
+    passed = sum(1 for r in rows if r["result"] == "Pass")
+    failed = sum(1 for r in rows if str(r["result"]).startswith("Fail"))
+    ws["A3"] = f"Screens: {len(rows)}   ·   Pass: {passed}   ·   Fail: {failed}   ·   Not tested: {len(rows) - passed - failed}"
+    ws["A3"].font = Font(bold=True)
+    names = ["Screen No", "Screen title", "Screenshot", "Reached by Next", "Next / forward", "Back", "Menu",
+             "Clickables (open & close)", "Result", "Notes"]
+    widths = [10, 26, 47, 14, 14, 12, 12, 22, 14, 44]
+    _header(ws, 5, names, widths)
+    slides = {s["id"]: s for s in res.get("slides", [])}
+    r = 6
+    for row in rows:
+        vals = [row["index"], row["title"], "", row["reached"], row["next"], row["back"], row["menu"], row["clicks"],
+                row["result"], row["notes"]]
+        for j, v in enumerate(vals, 1):
+            c = ws.cell(r, j, v)
+            c.alignment = Alignment(wrap_text=True, vertical="top", horizontal="center" if j not in (2, 10) else None)
+            c.border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
+            if j in (4, 5, 6, 7, 8, 9):
+                _result_cell(c)
+        img_h = 0
+        th = _thumb(run_dir, (slides.get(row["sid"]) or {}).get("shot", ""), 330)
+        if th:
+            img_h = _put_img(ws, th, r, 3, 330)
+        ws.row_dimensions[r].height = max(40, (img_h + 10) * 0.75)
+        r += 1
+    ws.freeze_panes = "A6"
+
+
+def _assessment_sheet(wb, res, run_dir):
+    """Assessment Test tab: the scenarios played (pass, fail, retry, no answer) and every answer option."""
+    ws = wb.create_sheet("Assessment Test")
+    A = res.get("assessment")
+    _title(ws, "Assessment Test", "The assessment was played like a learner: every option of every question, Submit with no "
+                                  "answer, all answers right, all answers wrong, and every Retry.")
+    if not A:
+        reason = (f"Not tested: testing stopped at an earlier screen ({res['blocked']['reason']})." if res.get("blocked")
+                  else "No assessment (question screens) found in this course.")
+        ws["A4"] = reason
+        ws.column_dimensions["A"].width = 100
+        return
+    rules = A.get("rules") or {}
+    facts = [("Question screens", len(A.get("quiz_ids") or [])),
+             ("Rules screen says", ", ".join(f"{k.replace('_', ' ')}: {v}{'%' if k == 'pass_mark' else ''}" for k, v in rules.items()) or "—"),
+             ("Pass mark in course settings", f"{A['pass_mark']}%" if A.get("pass_mark") is not None else "—"),
+             ("Attempts allowed (tested)", A.get("attempts_seen") or "—")]
+    r = 4
+    for k, v in facts:
+        ws.cell(r, 2, k).font = Font(bold=True)
+        ws.cell(r, 3, v).alignment = Alignment(horizontal="left")
+        r += 1
+    r += 1
+    ws.cell(r, 1, "Scenarios").font = Font(bold=True, size=13)
+    r += 1
+    _header(ws, r, ["Sl.no", "Scenario", "Steps", "Expected", "Actual", "Result", "Screenshot"], [7, 26, 36, 36, 42, 11, 47])
+    r += 1
+    for i, sc in enumerate(A.get("scenarios") or [], 1):
+        vals = [i, sc["name"], sc["steps"], sc["expected"], sc["actual"], sc["result"], ""]
+        for j, v in enumerate(vals, 1):
+            c = ws.cell(r, j, v)
+            c.alignment = Alignment(wrap_text=True, vertical="top")
+            c.border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
+        _result_cell(ws.cell(r, 6))
+        th = _thumb(run_dir, sc.get("shot"), 330)
+        h = _put_img(ws, th, r, 7, 330) if th else 0
+        ws.row_dimensions[r].height = max(60, (h + 10) * 0.75)
+        r += 1
+    r += 1
+    ws.cell(r, 1, "Questions and answer options").font = Font(bold=True, size=13)
+    r += 1
+    _header(ws, r, ["Sl.no", "Question screen", "Answer option", "Can be selected", "Feedback shown", "Result", "Screenshot"],
+            [7, 26, 36, 36, 42, 11, 47])
+    r += 1
+    n = 0
+    for q in A.get("questions") or []:
+        opts = q.get("options") or []
+        if not opts:
+            n += 1
+            note = {"other": "Not a choice question (drag and drop, hotspot or typing): options checked by hand",
+                    "not reached": "The question screen could not be opened"}.get(q.get("kind"), "No answer options found")
+            for j, v in enumerate([n, q["label"], note, "—", "—", "Not tested", ""], 1):
+                c = ws.cell(r, j, v)
+                c.alignment = Alignment(wrap_text=True, vertical="top")
+                c.border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
+            _result_cell(ws.cell(r, 6))
+            th = _thumb(run_dir, q.get("shot"), 330)
+            h = _put_img(ws, th, r, 7, 330) if th else 0
+            ws.row_dimensions[r].height = max(40, (h + 10) * 0.75)
+            r += 1
+            continue
+        for k, o in enumerate(opts):
+            n += 1
+            ok = o["selectable"] and o["feedback"] not in ("No Submit button",)
+            fb = o["feedback"] or "—"
+            if k in (q.get("key") or []):
+                fb += " (right answer)"
+            vals = [n, q["label"], o["label"], "Yes" if o["selectable"] else "No", fb, "Pass" if ok else "Fail", ""]
+            for j, v in enumerate(vals, 1):
+                c = ws.cell(r, j, v)
+                c.alignment = Alignment(wrap_text=True, vertical="top")
+                c.border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
+            _result_cell(ws.cell(r, 4))
+            _result_cell(ws.cell(r, 6))
+            th = _thumb(run_dir, o.get("shot"), 330)
+            h = _put_img(ws, th, r, 7, 330) if th else 0
+            ws.row_dimensions[r].height = max(40, (h + 10) * 0.75)
+            r += 1

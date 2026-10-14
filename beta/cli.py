@@ -120,22 +120,20 @@ def cmd_merge(a):
     for v in ans.get("script_compare", []):
         it = item("script_compare", v.get("item_id")) or {}
         if v.get("verdict") in ("mismatch", "minor_differences"):
-            add(check="transcript", severity="error" if v["verdict"] == "mismatch" else "warning",
-                message="Closed captions differ from the transcript",
-                slide_id=it.get("slide_id", ""), slide_label=it.get("label", ""), screenshot=it.get("shot", ""),
-                locate=" ".join((it.get("script") or "").split()[:6]),
-                detail="\n".join(v.get("differences") or []))
+            for d in (v.get("differences") or [""]):   # one issue per row
+                add(check="transcript", severity="error" if v["verdict"] == "mismatch" else "warning",
+                    message="Closed captions differ from the transcript",
+                    slide_id=it.get("slide_id", ""), slide_label=it.get("label", ""), screenshot=it.get("shot", ""),
+                    locate=" ".join((it.get("script") or "").split()[:6]), detail=d,
+                    fix="Make the captions match the transcript (VO script).")
     for v in ans.get("sb_compare", []):
         sid = v.get("slide_id") or ""
         sl = next((x for x in tasks.get("sb_compare", {}).get("slides", []) if x["id"] == sid), {})
-        details = []
-        if v.get("sb_says"):
-            details.append(f"SB: “{v['sb_says']}”")
-        if v.get("course_says"):
-            details.append(f"Course: “{v['course_says']}”")
-        if v.get("explanation"):
-            details.append(v["explanation"])
-        add(check="content", severity=v.get("severity") if v.get("severity") in ("error", "warning") else "error",
+        details = [v["explanation"]] if v.get("explanation") else []
+        in_sb = str(v.get("error_in") or "").lower() == "sb"
+        add(check="content", course_says=v.get("course_says", ""), sb_only=in_sb, assigned_to="ID" if in_sb else "",
+            fix=v.get("suggestion") or ("Correct the storyboard." if in_sb else
+                ("Change the course to match the SB." if v.get("sb_says") else "Check this with the SB and correct it.")), severity=v.get("severity") if v.get("severity") in ("error", "warning") else "error",
             message=f"Not as per SB – {v.get('issue', 'content differs')}", slide_id=sid,
             slide_label=sl.get("label", v.get("time", "")), time=v.get("time", ""), detail="\n".join(details),
             suggestion=v.get("sb_says", "") if v.get("found_in") in ("OST", "Slide Title") else "",
@@ -151,7 +149,7 @@ def cmd_merge(a):
                 details.append(v["explanation"])
             add(check=check, severity=v.get("severity") if v.get("severity") in ("error", "warning") else "warning",
                 message=v.get("issue", "Check this"), slide_id=sid, slide_label=slide_label(sid), detail="\n".join(details),
-                suggestion=v.get("suggestion", ""), locate=(v.get("quote") or "")[:80],
+                suggestion=v.get("suggestion", ""), fix=v.get("suggestion", ""), course_says=v.get("quote", ""), locate=(v.get("quote") or "")[:80],
                 screenshot=next((x.get("shot", "") for x in res.get("slides", []) if x.get("id") == sid), ""))
     rules = {r["rule"]: r["text"] for r in (tasks.get("sb_review") or {}).get("rules", [])}
     from beta.sbreview import RULE_GROUP, FOUND_IN
@@ -170,14 +168,16 @@ def cmd_merge(a):
             message=f"SB: {v.get('issue', 'issue')}", slide_id=f"p{page}" if page else "", slide_label=f"Page {page}" if page else "",
             detail="\n".join(details), suggestion=v.get("suggestion", ""), sb_says=v.get("quote", ""), sb_page=page or 0,
             rule=rules.get(rule, ""), found_in=FOUND_IN.get(v.get("found_in"), v.get("found_in") or "SB-OST"),
-            sb_screen=str(v.get("screen") or ""), screen_title=v.get("screen_title", ""))
+            sb_screen=str(v.get("screen") or ""), screen_title=v.get("screen_title", ""), sb_only=True, assigned_to="ID",
+            fix=v.get("suggestion", ""))
     for v in ans.get("transcript_review", []):
         it = item("transcript_review", v.get("item_id")) or {}
         if v.get("verdict") in ("mismatch", "minor_differences"):
-            add(check="transcript", severity="error" if v["verdict"] == "mismatch" else "warning",
-                message=f"Captions differ from narration ({it.get('score', 0) * 100:.0f}% word match)",
-                slide_id=it.get("slide_id", ""), slide_label=it.get("label", ""), time=it.get("time", ""),
-                detail="\n".join(v.get("differences") or it.get("diffs") or []))
+            for d in (v.get("differences") or it.get("diffs") or [""]):   # one issue per row
+                add(check="transcript", severity="error" if v["verdict"] == "mismatch" else "warning",
+                    message=f"Captions differ from narration ({it.get('score', 0) * 100:.0f}% word match)",
+                    slide_id=it.get("slide_id", ""), slide_label=it.get("label", ""), time=it.get("time", ""),
+                    detail=d, fix="Make the captions match what is spoken.")
     _save(run_dir, res)
     print(f"merged {added} findings")
 
@@ -243,36 +243,42 @@ def _font(size, bold=True):
 
 
 def _render(src, out, box, vw, tag="", mark=True, more=None):
-    """Saves a sharp JPEG with the issue marked: a red outline (on the spot, or around the whole screen) and a label.
-    `more` = further boxes of the same issue on this screen (e.g. several buttons that do nothing)."""
+    """Saves a sharp JPEG with the issue marked: the exact spot highlighted in bright yellow inside a thick red box
+    (or a red outline around the whole screen when the issue is about the screen as a whole) and a red label.
+    `more` = further boxes of the same issue on this screen."""
     from PIL import Image, ImageDraw
     im = Image.open(src).convert("RGB")
     k = im.width / vw if vw else 1.0
-    red = (225, 29, 29)
-    d = ImageDraw.Draw(im)
-    width = max(3, round(2.5 * k))
-    if mark and box:
-        for bx in more or []:
-            if bx and bx != box:
-                x, y, w, h = [v * k for v in bx]
-                d.rounded_rectangle([max(2, x - 4 * k), max(2, y - 4 * k), min(im.width - 3, x + w + 4 * k),
-                                     min(im.height - 3, y + h + 4 * k)], radius=round(6 * k), outline=red, width=width)
+    red = (230, 0, 18)
+    width = max(4, round(3.5 * k))
     if not mark:
         box, tag = None, ""
+
+    def rect(bx):
+        x, y, w, h = [v * k for v in bx]
+        pad = 5 * k
+        return [max(2, x - pad), max(2, y - pad), min(im.width - 3, x + w + pad), min(im.height - 3, y + h + pad)]
+    boxes = [b for b in ([box] + list(more or [])) if b] if (mark and box) else []
+    if boxes:   # bright highlight under the outline, so the spot stands out at a glance
+        glow = Image.new("RGBA", im.size, (0, 0, 0, 0))
+        g = ImageDraw.Draw(glow)
+        for bx in boxes:
+            g.rounded_rectangle(rect(bx), radius=round(6 * k), fill=(255, 235, 0, 70))
+        im = Image.alpha_composite(im.convert("RGBA"), glow).convert("RGB")
+    d = ImageDraw.Draw(im)
+    for bx in boxes[1:]:
+        d.rounded_rectangle(rect(bx), radius=round(6 * k), outline=red, width=width)
     if not mark:
         pass
     elif box:
-        x, y, w, h = [v * k for v in box]
-        pad = 4 * k
-        x0, y0 = max(2, x - pad), max(2, y - pad)
-        x1, y1 = min(im.width - 3, x + w + pad), min(im.height - 3, y + h + pad)
+        x0, y0, x1, y1 = rect(box)
     else:  # no single spot: outline the whole screen so it is clear the issue is about this screen
         inset = max(4, round(3 * k))
         x0, y0, x1, y1 = inset, inset, im.width - inset - 1, im.height - inset - 1
     if mark:
         d.rounded_rectangle([x0, y0, x1, y1], radius=round(6 * k), outline=red, width=width)
     if mark and tag:
-        f = _font(max(14, round(14 * k)))
+        f = _font(max(15, round(15 * k)))
         tw = d.textlength(tag, font=f)
         th = f.size * 1.25
         padx, pady = 8 * k / 1.2, 4 * k / 1.2
@@ -368,9 +374,10 @@ def _nice_label(label):
 
 
 def _group(findings, slides):
-    """Report each problem once.
-    1. Same problem several times on one screen (e.g. three buttons that do nothing) -> one row, all spots outlined.
-    2. Same problem on three or more screens (e.g. the seekbar shown on every screen) -> one row naming the screens."""
+    """Report each problem once, and one problem per row.
+    1. The same button failing on three or more screens (a button on the slide master) -> one row naming the screens.
+    2. The same problem on three or more screens (e.g. the seekbar shown on every screen) -> one row naming the screens.
+    Different problems on one screen always stay separate rows, each with its own outlined spot."""
     order = {s["id"]: s.get("index", 0) for s in slides.values()} if isinstance(slides, dict) else {}
     # 0. the same button on many screens (usually a button on the master slide): one row for it
     by_label = {}
@@ -389,35 +396,12 @@ def _group(findings, slides):
             first["_lab"] = True
             drop.update(id(g) for g in group[1:])
     findings = [f for f in findings if id(f) not in drop]
-    out, per = [], {}
+    # one issue per row: several problems on one screen (e.g. two buttons that do nothing) stay separate rows,
+    # each with its own outlined spot
+    out = []
     for f in findings:
-        if f.pop("_lab", False):
-            out.append(f)
-            continue
-        key = (f.get("check"), f.get("slide_id"), f.get("message"), f.get("mobile"))
-        g = per.get(key)
-        if g is None or not f.get("slide_id"):
-            per[key] = f
-            f["_n"] = 1
-            out.append(f)
-            continue
-        g["_n"] += 1
-        if f.get("box"):
-            g.setdefault("boxes", [g["box"]] if g.get("box") else []).append(f["box"])
-            if not g.get("box"):
-                g.update(box=f["box"], screenshot=f.get("screenshot") or g.get("screenshot"), vw=f.get("vw") or g.get("vw"))
-        d = (f.get("detail") or "").split("\n")[0]
-        if d and d not in (g.get("detail") or ""):
-            g["detail"] = ((g.get("detail") or "") + "\n" + d).strip()
-        if f.get("severity") == "error":
-            g["severity"] = "error"
-    for g in out:
-        n = g.pop("_n", 1)
-        if n > 1 and g.get("check") == "buttons":
-            g["message"] = f"{n} buttons not working on this screen (nothing happens on click)"
-            g["tag"] = "Buttons not working"
-        elif n > 1:
-            g["message"] = f"{g['message']} ({n} places on this screen)"
+        f.pop("_lab", None)
+        out.append(f)
     # the same problem across many screens
     across, final = {}, []
     for f in out:
@@ -524,12 +508,22 @@ def cmd_bundle(a):
             if hit:
                 if hit != src_rel:
                     f["screenshot"] = src_rel = hit
-            elif f.get("check") in ("grammar", "spelling", "transcript") and "not seen on screen" not in (f.get("detail") or ""):
+            elif f.get("check") in ("grammar", "spelling") and slide and slide.get("shot") and res.get("stage") != "sb":
+                # the words are only in the course files, never visible to a learner: not reported (team rule)
+                f["_hidden"] = True
+                continue
+            elif f.get("check") in ("transcript",) and "not seen on screen" not in (f.get("detail") or ""):
                 f["detail"] = ((f.get("detail") or "") + "\nThis text was not seen on screen during testing: it is in a part of the screen that opens on a click (layer), or it is hidden.").strip()
         name = f"bundle/f{i:03d}.jpg"
         sb_img = None
         if res.get("stage") == "sb" and sb_words:
             # SB stage: the evidence is the SB page itself, with the words the issue is about outlined
+            got = _sb_evidence(run_dir, sb_words, f, name, tag=f.get("tag", ""))
+            if got:
+                f["screenshot"], f["box"] = got, None
+                continue
+        if f.get("sb_only") and sb_words:
+            # the mistake is in the storyboard itself: only the SB page is shown, no course screenshot
             got = _sb_evidence(run_dir, sb_words, f, name, tag=f.get("tag", ""))
             if got:
                 f["screenshot"], f["box"] = got, None
@@ -560,6 +554,13 @@ def cmd_bundle(a):
             _side_by_side(run_dir / f["screenshot"], run_dir / sb_img, run_dir / xl,
                           "COURSE – " + ((slide or {}).get("label") or f.get("slide_label") or ""), "STORYBOARD (SB)")
             f["xl_screenshot"] = xl
+    hidden = [f for f in res["findings"] if f.pop("_hidden", False)]
+    if hidden:
+        res["findings"] = [f for f in res["findings"] if f not in hidden]
+        res["hidden_text_dropped"] = len(hidden)
+    from beta.qc_report import feedback_text
+    for f in res["findings"]:
+        f["feedback"] = feedback_text(f)
     _save(run_dir, res)
     names = {f"bundle/{p.name}": p.name for p in sorted(out.glob("*.jpg"))}
     (out / "names.json").write_text(json.dumps(names, indent=1))

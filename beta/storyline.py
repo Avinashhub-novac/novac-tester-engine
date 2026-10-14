@@ -32,7 +32,7 @@ class Slide:
     next_target: str = ""   # slide id the Next trigger jumps to ("" = unknown)
     prev_target: str = ""
     is_quiz: bool = False
-    dead_click_objects: list = field(default_factory=list)  # names of objects with click triggers but no actions
+    dead_click_objects: list = field(default_factory=list)  # [{id, label}] objects with click triggers but no actions
     nav_objects: list = field(default_factory=list)  # [{id, label, target}] slide buttons that jump to a slide
     click_objects: list = field(default_factory=list)  # [{id, label}] every object with a click trigger
     raw_ok: bool = True
@@ -311,12 +311,12 @@ def _dead_clicks(slide_json):
         for ev in evs:
             if isinstance(ev, dict) and ev.get("kind") in CLICK_EVENTS and not ev.get("actions"):
                 name = d.get("accText") or d.get("altText") or d.get("id")
-                out.append(str(name))
+                out.append({"id": str(d["id"]), "label": str(name)})
     return out
 
 
 def _is_quiz(slide_json):
-    blob = json.dumps(slide_json)[:500000].lower()
+    blob = json.dumps(slide_json, separators=(",", ":"))[:500000].lower()
     return any(k in blob for k in ('"kind":"multiplechoice"', '"kind":"truefalse"', '"kind":"multipleresponse"',
                                    '"quiz"', '"interaction"', '"kind":"freeform', '"submit'))
 

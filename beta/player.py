@@ -161,6 +161,7 @@ CLICKABLES_JS = r"""
                   el.getAttribute('data-acc-type') === 'button' || el.getAttribute('data-acc-type') === 'hotspot' ||
                   (s.cursor === 'pointer' && (!el.parentElement || getComputedStyle(el.parentElement).cursor !== 'pointer'));
     if (!isBtn) return;
+    if (el.closest('[class*="scrollbar" i], [class*="scroll-bar" i]')) return;   // text box scrollbars are not items to open
     const r = el.getBoundingClientRect();
     // only what a learner can actually see and click: not covered, not see-through, not a hidden layer
     let op = 1; for (let p = el; p && p !== document.body; p = p.parentElement) op *= parseFloat(getComputedStyle(p).opacity || '1');
@@ -263,5 +264,97 @@ TRANSCRIPT_JS = r"""
     }
   }
   return '';
+}
+"""
+
+# Answer options of a question screen (radio buttons / check boxes, including Storyline's screen-reader copies).
+OPTIONS_JS = r"""
+() => {
+  const out = [], seen = new Set();
+  const q = "[role='radio'], [role='checkbox'], [data-acc-type='radiobutton'], [data-acc-type='checkbox'], input[type=radio], input[type=checkbox]";
+  document.querySelectorAll(q).forEach(el => {
+    const s = getComputedStyle(el);
+    if (s.display === 'none' || s.visibility === 'hidden') return;
+    for (let p = el.parentElement; p && p !== document.body; p = p.parentElement) {
+      const ps = getComputedStyle(p); if (ps.display === 'none' || ps.visibility === 'hidden') return;
+    }
+    const r = el.getBoundingClientRect();
+    if (r.width < 4 || r.height < 4 || r.right < 0 || r.bottom < 0 || r.left > innerWidth || r.top > innerHeight) return;
+    const label = (el.getAttribute('aria-label') || el.getAttribute('data-acc-text') || el.innerText ||
+                   (el.labels && el.labels[0] && el.labels[0].innerText) || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    const key = Math.round(r.x / 6) + ',' + Math.round(r.y / 6);
+    if (seen.has(key)) return; seen.add(key);
+    const checked = el.getAttribute('aria-checked') === 'true' || el.checked === true ||
+                    el.getAttribute('aria-pressed') === 'true' || el.getAttribute('aria-selected') === 'true';
+    out.push({ label, box: [r.x, r.y, r.width, r.height], checked,
+               disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true' });
+  });
+  out.sort((a, b) => (a.box[1] - b.box[1]) || (a.box[0] - b.box[0]));
+  return out;
+}
+"""
+
+# Text that overlaps other visible text (both pieces on top, so the learner sees them on each other).
+OVERLAP_JS = r"""
+() => {
+  const blocks = [];
+  const add = (el, t, r) => {
+    if (!t || r.width < 6 || r.height < 6 || r.right < 0 || r.bottom < 0 || r.left > innerWidth || r.top > innerHeight) return;
+    blocks.push({ el, t: t.replace(/\s+/g, ' ').trim().slice(0, 120), b: [r.x, r.y, r.width, r.height] });
+  };
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  const range = document.createRange(); let node;
+  while ((node = walker.nextNode()) && blocks.length < 400) {
+    if (!node.textContent.trim()) continue;
+    const el = node.parentElement; if (!el) continue;
+    const s = getComputedStyle(el);
+    if (s.visibility === 'hidden' || s.display === 'none' || parseFloat(s.opacity) < 0.2) continue;
+    if (el.closest('.acc-shadow-dom, [class*="acc-shadow"]')) continue;
+    range.selectNodeContents(node);
+    for (const r of range.getClientRects()) add(el, node.textContent, r);
+  }
+  const solid = el => {
+    const s = getComputedStyle(el);
+    if (['IMG', 'CANVAS', 'VIDEO'].includes(el.tagName)) return true;
+    const m = (s.backgroundColor || '').match(/rgba?\(([^)]+)\)/);
+    if (m) { const v = m[1].split(',').map(Number); if (v.length < 4 || v[3] > 0.5) return true; }
+    if (el instanceof SVGElement && !['text', 'tspan', 'svg', 'g'].includes(el.tagName.toLowerCase())) {
+      const f = s.fill || ''; if (f && f !== 'none' && !/rgba\([^)]*,\s*0\)/.test(f) && parseFloat(s.fillOpacity || '1') > 0.5) return true;
+    }
+    return false;
+  };
+  const covered = (a, b, x, y) => {
+    const stack = document.elementsFromPoint(x, y);
+    const pos = bl => stack.findIndex(e => e === bl.el || bl.el.contains(e));
+    const ia = pos(a), ib = pos(b);
+    if (ia < 0 || ib < 0) return true;
+    const [upper, lower] = ia < ib ? [a, b] : [b, a];
+    const lo = Math.max(ia, ib);
+    for (let k = 0; k < lo; k++) {
+      const e = stack[k];
+      if (e === upper.el || upper.el.contains(e) || e.contains(lower.el)) continue;
+      if (solid(e)) return true;
+    }
+    return false;
+  };
+  const onTop = (bl, x, y) => { const t = document.elementFromPoint(x, y); return !!t && (t === bl.el || bl.el.contains(t) || t.contains(bl.el)); };
+  const hits = [];
+  for (let i = 0; i < blocks.length; i++) for (let j = i + 1; j < blocks.length; j++) {
+    const a = blocks[i], b = blocks[j];
+    if (a.el === b.el || a.el.contains(b.el) || b.el.contains(a.el) || a.t === b.t) continue;
+    const x0 = Math.max(a.b[0], b.b[0]), y0 = Math.max(a.b[1], b.b[1]);
+    const x1 = Math.min(a.b[0] + a.b[2], b.b[0] + b.b[2]), y1 = Math.min(a.b[1] + a.b[3], b.b[1] + b.b[3]);
+    if (x1 - x0 < 6 || y1 - y0 < 4) continue;
+    const small = Math.min(a.b[2] * a.b[3], b.b[2] * b.b[3]);
+    if ((x1 - x0) * (y1 - y0) < 0.25 * small) continue;
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    if (!onTop(a, cx, cy) && !onTop(b, cx, cy)) continue;
+    if (covered(a, b, cx, cy)) continue;   // one piece sits on a solid box (a pop-up): only one is really seen
+    hits.push({ a: a.t, b: b.t, box: [Math.min(a.b[0], b.b[0]), Math.min(a.b[1], b.b[1]),
+               Math.max(a.b[0] + a.b[2], b.b[0] + b.b[2]) - Math.min(a.b[0], b.b[0]),
+               Math.max(a.b[1] + a.b[3], b.b[1] + b.b[3]) - Math.min(a.b[1], b.b[1])] });
+    if (hits.length >= 5) return hits;
+  }
+  return hits;
 }
 """
