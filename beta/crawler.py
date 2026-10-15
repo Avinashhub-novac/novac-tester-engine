@@ -68,6 +68,7 @@ class Crawler(QuizMixin):
     _aprog = _per_pass("_aprog")
     pass_name = _per_pass("pass_name", "")
     _lane_pos = _per_pass("_lane_pos")
+    _clicked_n = _per_pass("_clicked_n", 0)
 
     @property
     def learned(self):
@@ -850,11 +851,23 @@ class Crawler(QuizMixin):
                     b = self._submit_box(page)
                     nav = {"box": b, "label": "Submit", "target": slide.next_target if slide else "NEXT"}
                 if nav is None and slide and slide.index < n and not slide.has_interaction:
+                    # the way forward may open only after every item on the screen was clicked: do that first (quick)
+                    got = self._unstick(page, sid, slide, None)
+                    if got and got != sid and not got.startswith("unknown"):
+                        carry = got
+                        self.col.ran("navigation")
+                        prev_sid = sid
+                        continue
+                    nav = self.slide_nav(page, slide, "forward")
+                if nav is None and slide and slide.index < n and not slide.has_interaction:
                     self._wait_full(page, slide)
                     nav = self.slide_nav(page, slide, "forward")
                 if nav is None:
                     if slide and slide.index < n:
                         if not slide.has_interaction:
+                            if self._locked_by_items(sid, slide) and self._jump_on(page, sid, slide, None, None):
+                                prev_sid = sid
+                                continue
                             self._block(sid, "No way to go to the next screen (no Next button and no button that moves on)")
                             break
                         if not self._jump_on(page, sid, slide, None, None):
@@ -892,6 +905,10 @@ class Crawler(QuizMixin):
                     new = self.identify(s2, expected=expected if self._moved(b2, self._sig(s2)) else None)
                     carry = new
                 if new == sid:
+                    if not (slide and slide.has_interaction) and self._locked_by_items(sid, slide):
+                        if self._jump_on(page, sid, slide, None, None):
+                            carry, prev_sid = None, sid
+                            continue
                     if not (slide and slide.has_interaction):   # an activity must be finished first: not a fault
                         self._block(sid, f"“{lab}” does not go to the next screen", nshot, nav["box"])
                         break
@@ -926,6 +943,8 @@ class Crawler(QuizMixin):
                         break
                     if slide and slide.has_interaction:   # an activity the tester cannot finish (drag and drop): go on
                         rec["note"] = "Activity could not be completed by the tester; the next screen was opened directly"
+                        ok = self._jump_on(page, sid, slide, None, None)
+                    elif self._locked_by_items(sid, slide):
                         ok = self._jump_on(page, sid, slide, None, None)
                     else:
                         self._block(sid, "Next stays disabled after the screen finished and every item on it was clicked",
@@ -1347,6 +1366,18 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             objs = [o for o in page.evaluate(CLICKABLES_JS, SEL) if not any(inside(o, b) for b in nav_boxes)][:14]
         except Exception:
             objs = []
+        if slide:   # newer Storyline output gives no clickable hints: use the course's own list of clickable items
+            skip = {o["id"] for o in slide.nav_objects} | set(getattr(self.course, "menu_ids", []) or [])
+            for co in slide.click_objects:
+                if co["id"] in skip or len(objs) >= 14:
+                    continue
+                b = self._visible_box(page, co["id"])
+                if b:
+                    c = {"x": b[0] + b[2] / 2, "y": b[1] + b[3] / 2}
+                    if not any(inside(c, nb) for nb in nav_boxes) and not any(abs(c["x"] - o["x"]) < 8 and abs(c["y"] - o["y"]) < 8 for o in objs):
+                        objs.append(self._as_obj(co["label"] or "", b))
+        objs = [o for o in objs if not re.match(r"^\s*(menu|help|notes|close|exit|resources|glossary)\b", o.get("label") or "", re.I)]
+        self._clicked_n = len(objs)
         self._fill_inputs(page)
         if objs:
             self.log(f"{self.label(sid)}: clicking {len(objs)} items on the screen before going on")
@@ -1363,20 +1394,45 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 got = self.identify(self.settle(page, 300))
                 if got != sid and not got.startswith("unknown"):
                     return got   # that item was itself a way forward
-            for word in ("Close", "Continue", "OK", "X"):   # close a pop-up layer, if one opened
-                try:
-                    b = page.get_by_role("button", name=re.compile(rf"^{word}$", re.I))
-                    if b.count() and b.first.is_visible():
-                        b.first.click(timeout=800)
-                        page.wait_for_timeout(400)
-                        break
-                except Exception:
-                    pass
+            self._close_any(page, slide)   # close the pop-up layer the item opened, if any
         self.seek_to_end(page)
         page.wait_for_timeout(600)
         if retry is None:
             return sid
         return retry()
+
+    def _close_any(self, page, slide):
+        """Closes a pop-up layer: its Close / × button (by name, drawn as a shape, or as the course data says)."""
+        for word in ("Close", "Continue", "OK", "X", "×"):
+            try:
+                b = page.get_by_role("button", name=re.compile(rf"^{re.escape(word)}$", re.I))
+                if b.count() and b.first.is_visible():
+                    b.first.click(timeout=800)
+                    page.wait_for_timeout(400)
+                    return True
+            except Exception:
+                pass
+        nb = self._named_box(page, ["close", "x", "×", "✕", "continue", "ok"])
+        if nb is None and slide:
+            for cid in (getattr(slide, "close_objects", None) or []):
+                nb = self._visible_box(page, cid)
+                if nb:
+                    break
+        if nb:
+            self.click_box(page, nb)
+            page.wait_for_timeout(400)
+            return True
+        return False
+
+    def _locked_by_items(self, sid, slide):
+        """Next stays locked although every clickable item was opened: report it and carry on (never stop the test)."""
+        if not slide or not (getattr(self, "_clicked_n", 0) or slide.click_objects):
+            return False
+        self.col.add("navigation", "error", "Next stays locked after every clickable item on the screen was opened",
+                     slide_id=sid, slide_label=self.label(sid), screenshot=self.visits.get(sid, {}).get("shot", ""),
+                     found_in="Navigation", detail="The tester opened every item, then opened the next screen directly to carry on.",
+                     fix="Enable Next once the learner has opened every clickable item.")
+        return True
 
     def no_nav_expected(self, slide):
         """Screens without their own Back / Next: the welcome screen and the assessment (questions and result)."""
