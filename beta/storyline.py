@@ -10,8 +10,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 PROVIDE_RE = re.compile(r"globalProvideData\(\s*'(\w+)'\s*,\s*'(.*)'\s*\)\s*;?\s*$", re.S)
-MEDIA_RE = re.compile(r"[\w\-./]*?[\w\-]+\.(?:mp3|m4a|wav|ogg|aac)\b", re.I)
-VIDEO_RE = re.compile(r"[\w\-./]*?[\w\-]+\.(?:mp4|webm|m4v)\b", re.I)
+AUDIO_EXT = re.compile(r"\.(?:mp3|m4a|wav|ogg|aac)\b", re.I)
+VIDEO_EXT = re.compile(r"\.(?:mp4|webm|m4v)\b", re.I)
+_PATH_CH = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./")
+
+
+def _media_refs(raw, ext_re):
+    """File paths ending in one of the extensions. Found from each extension backwards, so the time grows only
+    with the file size (a pattern search over long embedded data could take hours)."""
+    out = set()
+    for m in ext_re.finditer(raw):
+        i = m.start()
+        j = i
+        while j > 0 and raw[j - 1] in _PATH_CH and i - j < 300:
+            j -= 1
+        name = raw[j:m.end()].lstrip("./")
+        stem = name[: -len(m.group(0))].rsplit("/", 1)[-1]
+        if stem and any(c.isalnum() for c in stem):
+            out.add(name)
+    return sorted(out)
 CAPTION_FILE_RE = re.compile(r"[\w\-./]+?\.(?:vtt|srt)", re.I)
 CLICK_EVENTS = {"onrelease", "onclick", "ontap", "onpress", "onrelease_outside"}
 
@@ -40,10 +57,14 @@ class Slide:
     object_ids: set = field(default_factory=set)   # ids of every object on the slide (shown as data-model-id)
     scene_id: str = ""
     has_interaction: bool = False   # drag-drop, quiz or other activity the learner must finish
+    draw: str = ""   # id of the question bank draw this question comes from ("" = a normal screen)
+    choices: list = field(default_factory=list)  # [{obj, text, correct}] answer options of a one-answer question (from the course data)
 
     @property
     def abs_id(self):
         """The player's own address for the slide (used to open it directly)."""
+        if self.scene_id and self.draw:
+            return f"_player.{self.scene_id}.{self.draw}.{self.id}"
         return f"_player.{self.scene_id}.{self.id}" if self.scene_id else self.id
 
     @property
@@ -65,6 +86,28 @@ class Course:
     scene_start: dict = field(default_factory=dict)   # scene id -> its first slide id
     menu_ids: list = field(default_factory=list)       # ids of course "Menu" buttons found in the published data
     scorings: list = field(default_factory=list)      # quiz scoring settings (pass mark, quiz type)
+    draws: dict = field(default_factory=dict)  # draw id -> {ids, count, exit, abs, scene}: questions picked from a bank
+    quiz_refs: list = field(default_factory=list)  # slide ids the graded quiz scores (draws expanded), story order
+
+    def draw_of(self, sid):
+        s = self.by_id(sid)
+        return s.draw if s else ""
+
+    def same_draw(self, a, b):
+        da = self.draw_of(a)
+        return bool(da) and da == self.draw_of(b)
+
+    def asked(self, quiz):
+        """How many questions the learner answers in one attempt (a draw asks only its pick count)."""
+        n, seen = 0, set()
+        for q in quiz:
+            if q.draw:
+                if q.draw not in seen:
+                    seen.add(q.draw)
+                    n += self.draws.get(q.draw, {}).get("count") or 0
+            else:
+                n += 1
+        return n
 
     def by_id(self, sid):
         for s in self.slides:
@@ -342,6 +385,31 @@ def _is_quiz(slide_json):
                                    '"kind":"sequence"', '"kind":"fillin"', '"kind":"hotspot"', '"kind":"wordbank"'))
 
 
+def _choices(slide_entry):
+    """Answer options of a one-answer question and which one is right, as the course data defines them.
+    Returns [] when the screen is not such a question (or the right answer cannot be read)."""
+    inters = [x for x in (slide_entry.get("interactions") or []) if isinstance(x, dict)]
+    if len(inters) != 1 or inters[0].get("type") not in ("multiplechoice", "truefalse") or inters[0].get("issurvey"):
+        return []
+    it = inters[0]
+    right = set()
+    for a in it.get("answers") or []:
+        if not isinstance(a, dict) or a.get("status") != "correct":
+            continue
+        sts = (a.get("evaluate") or {}).get("statements") or []
+        ids = [str(s.get("choiceid") or "") for s in sts if isinstance(s, dict) and s.get("kind") == "equals"]
+        if len(ids) == 1:
+            right.add(ids[0].rsplit("choice_", 1)[-1])
+    out = []
+    for c in it.get("choices") or []:
+        cid = str((c or {}).get("id") or "")
+        obj = cid.split("choice_", 1)[-1]
+        out.append({"obj": obj, "text": _plain(c.get("lmstext") or ""), "correct": obj in right})
+    if len(right) != 1 or sum(1 for c in out if c["correct"]) != 1:
+        return []
+    return out
+
+
 # ---------------------------------------------------------------- loader
 def find_launch(root: Path):
     # the LMS launch file first: it is the only one that reports completion
@@ -383,24 +451,60 @@ def load_course(extract_dir: Path) -> Course:
                        | {"questions": len(x.get("scoreRefs") or [])}
                        for x in (data.get("scorings") or []) if isinstance(x, dict)]
 
+    bank = {str(b.get("id")): b for b in ((data.get("slideBank") or {}).get("slides") or []) if isinstance(b, dict) and b.get("id")}
     idx = 0
     for scene in data.get("scenes", []) or []:
         # the player's own Resume / Warning prompts live in a "message scene": they are not course screens
         if scene.get("isMessageScene") or scene.get("id") == "PromptScene":
             continue
         start = str(scene.get("startingSlide") or "").rsplit(".", 1)[-1]
-        for sd in scene.get("slides", []) or []:
-            if str(sd.get("id")) in ("ResumePromptSlide", "ExternalInterfaceErrorSlide"):
+        # question banks: a "draw" sits between the scene's slides and shows N questions picked from a bank
+        draws_at = {}
+        for dr in scene.get("slidedraws", []) or []:
+            if not isinstance(dr, dict) or not dr.get("id"):
                 continue
+            refs = [str(r.get("id")) for r in dr.get("sliderefs") or [] if isinstance(r, dict) and r.get("id") in bank]
+            if not refs:
+                continue
+            ex = dr.get("exitaction") or {}
+            exit_ref = str(((ex.get("objRef") or {}).get("value")) or "").rsplit(".", 1)[-1]
+            cnt = int(dr.get("shufflecount") or 0) if dr.get("shuffle") else 0
+            cnt = cnt if 0 < cnt <= len(refs) else len(refs)
+            course.draws[str(dr["id"])] = {"ids": refs, "count": cnt, "exit": exit_ref, "scene": str(scene.get("id") or ""),
+                                           "abs": f"_player.{scene.get('id')}.{dr['id']}", "lms": dr.get("lmsId") or ""}
+            pos = int(dr.get("slideNumberInScene") or 0)
+            draws_at.setdefault(pos, []).append(str(dr["id"]))
+
+        def add(sd, draw=""):
+            nonlocal idx
             idx += 1
             course.slides.append(Slide(
+                choices=_choices(sd),
                 id=str(sd.get("id", f"slide{idx}")),
                 title=_plain(sd.get("title") or ""),
                 index=idx,
                 scene=scene.get("title") or scene.get("id", ""),
                 url=sd.get("html5url") or sd.get("url") or "",
                 scene_id=str(scene.get("id") or ""),
+                draw=draw,
             ))
+
+        def add_draws(pos):
+            for did in draws_at.pop(pos, []):
+                for rid in course.draws[did]["ids"]:
+                    add(bank[rid], did)
+
+        item = 0   # draws and slides share one numbering in the scene
+        for sd in scene.get("slides", []) or []:
+            if str(sd.get("id")) in ("ResumePromptSlide", "ExternalInterfaceErrorSlide"):
+                continue
+            while item + 1 in draws_at:
+                item += 1
+                add_draws(item)
+            item += 1
+            add(sd)
+        for pos in sorted(draws_at):
+            add_draws(pos)
         if scene.get("id"):
             course.scene_start[str(scene["id"])] = start or (course.slides[-1].id if course.slides else "")
     known = set(course.ids())
@@ -425,24 +529,46 @@ def load_course(extract_dir: Path) -> Course:
         raw = path.read_text(encoding="utf-8", errors="replace")
         s.texts, s.notes = _texts(sj)
         s.captions = _captions(sj)
-        s.audio = sorted(set(MEDIA_RE.findall(raw)))
-        s.video = sorted(set(VIDEO_RE.findall(raw)))
+        s.audio = _media_refs(raw, AUDIO_EXT)
+        s.video = _media_refs(raw, VIDEO_EXT)
         s.duration_ms = _duration(sj)
         s.next_target = _event_target(sj, {"onnextslide", "next"}, known - {s.id})
         s.prev_target = _event_target(sj, {"onprevslide", "prev"}, known - {s.id})
         s.is_quiz = _is_quiz(sj)
         s.has_interaction = s.is_quiz or bool(sj.get("interactions")) or '"dragdrop' in raw.lower() or '"kind":"dragitem' in raw.lower()
         s.dead_click_objects = _dead_clicks(sj)
-        s.nav_objects = _nav_objects(sj, known - {s.id})
+        s.nav_objects = _nav_objects(sj, (known | set(course.draws)) - {s.id})
+        for o in s.nav_objects:   # a button that starts a question bank goes to its first question
+            if o["target"] in course.draws:
+                o["target"] = course.draws[o["target"]]["ids"][0]
+        if not s.next_target:
+            d = _event_target(sj, {"onnextslide", "next"}, set(course.draws))
+            if d:
+                s.next_target = course.draws[d]["ids"][0]
         s.click_objects = _click_objects(sj)
         s.close_objects = _close_objects(sj)
         s.object_ids = {str(d["id"]) for _, d in _walk(sj) if "id" in d and isinstance(d.get("id"), (str, int))} - {s.id}
+    # the slides the graded quiz scores (a draw stands for all its bank questions)
+    for qz in data.get("quizzes") or []:
+        if not isinstance(qz, dict) or qz.get("issurvey"):
+            continue
+        for r in qz.get("sliderefs") or []:
+            rid = str((r or {}).get("id") or "").rsplit(".", 1)[-1]
+            if rid in course.draws:
+                course.quiz_refs += course.draws[rid]["ids"]
+            elif rid in known:
+                course.quiz_refs.append(rid)
+    order = {sid: i for i, sid in enumerate(course.ids())}
+    course.quiz_refs = sorted(dict.fromkeys(course.quiz_refs), key=lambda x: order.get(x, 0))
     seen, shared = set(), set()
     for s in course.slides:
         shared |= seen & s.object_ids
         seen |= s.object_ids
     for s in course.slides:
         s.object_ids -= shared | known
+    for s in course.slides:
+        if s.draw and course.draws.get(s.draw, {}).get("exit") in known:
+            s.next_target = s.next_target or ""
     for i, s in enumerate(course.slides):
         if not s.next_target:
             # a custom "next" button on the slide decides where Next goes when the player has none

@@ -288,7 +288,10 @@ OPTIONS_JS = r"""
     if (seen.has(key)) return; seen.add(key);
     const checked = el.getAttribute('aria-checked') === 'true' || el.checked === true ||
                     el.getAttribute('aria-pressed') === 'true' || el.getAttribute('aria-selected') === 'true';
-    out.push({ label, box: [r.x, r.y, r.width, r.height], checked,
+    // which course object the option is: the accessibility copy names it (data-represents / id="acc-<id>")
+    const holder = el.closest('[data-model-id]');
+    const rep = (el.getAttribute('data-represents') || '').split('.').pop() || (el.id || '').replace(/^acc-/, '');
+    out.push({ label, box: [r.x, r.y, r.width, r.height], checked, mid: holder ? holder.getAttribute('data-model-id') : rep,
                disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true' });
   });
   out.sort((a, b) => (a.box[1] - b.box[1]) || (a.box[0] - b.box[0]));

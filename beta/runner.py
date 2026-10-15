@@ -121,7 +121,14 @@ class Run:
             z.extractall(content)
         course = load_course(content)
         # course videos in MP4 (H.264 / AAC) do not play in the open-source test browser: play a converted copy
-        self.media_prepared = media.make_playable(course.root, self.log)
+        todo = media.media_to_prepare(course.root)
+        self.media_estimate = media.prepare_estimate(todo)
+        if todo:
+            from .progress import plan_scorm as _plan
+            self.prog.set_plan(_plan(course.slides, ["desktop"], True, bool(self.meta.get("storyboard")), True,
+                                     self.media_estimate))
+            self.prog.phase("media")
+        self.media_prepared = media.make_playable(course.root, self.log, todo=todo, tick=self.prog.tick)
         for w in course.warnings:
             self.col.add("navigation", "warning", w)
         self.log(f"Course model: {len(course.slides)} slides" + (f" – {course.title}" if course.title else ""))
@@ -137,8 +144,12 @@ class Run:
             passes = ["desktop", "prev", "assessment"]
         if not any(s.is_quiz for s in course.slides):
             passes = [p for p in passes if p != "assessment"]
+        # time limit: twice the course's running time plus 10 minutes (at least 20), so a test never hangs
+        play_min = sum(min(s.duration_ms, 600000) for s in course.slides) / 60000.0
+        limit = min(config.MAX_CRAWL_MINUTES, max(20.0, 2 * play_min + 10))
+        self.log(f"Course running time about {play_min:.0f} min; the browser checks stop after {limit:.0f} min at the latest")
         crawler = Crawler(course, url, self.dir, self.col, play_full=opts.get("play_full", True),
-                          max_minutes=config.MAX_CRAWL_MINUTES, log=self.log, max_buttons=config.MAX_BUTTONS_PER_SLIDE)
+                          max_minutes=limit, log=self.log, max_buttons=config.MAX_BUTTONS_PER_SLIDE)
         crawler.expect = opts.get("expect") or {}
         beta = opts.get("stage", "beta") == "beta"
         crawler.check_completion = beta or gold   # Beta: completion; Gold: the assessment result sent to the LMS
@@ -146,7 +157,8 @@ class Run:
             passes.remove("mobile")
         from .progress import plan_scorm
         self.prog.set_plan(plan_scorm(course.slides, passes, opts.get("play_full", True),
-                                      bool(self.meta.get("storyboard")), opts.get("transcript", True)))
+                                      bool(self.meta.get("storyboard")), opts.get("transcript", True),
+                                      getattr(self, "media_estimate", 0.0)))
         crawler.on_progress = self.prog.tick
         crawler.run_menu = "menu" in passes
         visits = crawler.run(passes)
@@ -217,6 +229,11 @@ class Run:
                              "The course never connected to the LMS (no SCORM calls)", screenshot=shot,
                              box=comp.get("panel_box"), vw=1060,
                              detail=f"Launched {course.launch_file}. Upload the LMS-published zip (Publish → LMS) to test tracking.")
+            elif not comp["completed"] and self._passed_by_quiz(crawler):
+                # the walk-through answers questions without knowing the answers, so it can fail the quiz;
+                # the assessment test passed it and the LMS then showed the course as passed / completed
+                self.col.add("completion", "info", "Course is completed by passing the assessment",
+                             detail="Answering every question correctly sent “passed” / “completed” to the LMS.")
             elif not comp["completed"]:
                 st = comp["completion_status"] or comp["lesson_status"] or "no status sent"
                 self.col.add("completion", "error", f"Course did not report completion after the last slide (status: {st})",
@@ -320,6 +337,16 @@ class Run:
                              "media_prepared": self.media_prepared,
                              **tables})
 
+    @staticmethod
+    def _passed_by_quiz(crawler):
+        A = getattr(crawler, "assessment", None) or {}
+        for s in A.get("scenarios") or []:
+            if s.get("name") == "All answers correct":
+                lms = s.get("lms") or {}
+                st = " ".join(str(lms.get(k) or "") for k in ("status", "success", "completion")).lower()
+                return "passed" in st or "completed" in st
+        return False
+
     def test_tables(self, course, visits, crawler, passes):
         """Navigation test (every screen: Next, Back, menu, clickables) and the assessment test, for the report tabs."""
         from .crawler import is_welcome
@@ -370,7 +397,8 @@ class Run:
             else:
                 clicks = "Fail" if click_f else ("Not tested" if "buttons" not in passes or crawler.blocked else "No clickable items")
             row = {"sid": s.id, "index": s.index, "title": s.title, "label": s.label,
-                   "reached": "Not tested (testing stopped)" if after_stop else ("Yes" if reached else ("No – opened directly" if v.get("via_jump") else "No")),
+                   "reached": "Not tested (testing stopped)" if after_stop else ("Yes" if reached else (
+                       "Question bank – not drawn in this attempt" if s.draw else ("No – opened directly" if v.get("via_jump") else "No"))),
                    "next": res(next_f, reached or k == 0, na=last and not next_f),
                    "back": res(back_f, "prev" in passes and not crawler.blocked, na=(no_nav or k == 0) and not back_f),
                    "menu": res(menu_f, "menu" in passes and not crawler.blocked) if not (
@@ -449,7 +477,8 @@ class Run:
             if comp.get("connected") and not comp.get("score"):
                 self.col.add("assessment", "error", "The quiz score is not sent to the LMS", screenshot=comp.get("panel_shot", ""),
                              box=comp.get("panel_box"), vw=1060)
-            if comp.get("connected") and not (comp.get("success_status") or comp.get("lesson_status") in ("passed", "failed", "completed")):
+            if comp.get("connected") and not (comp.get("success_status") or comp.get("lesson_status") in ("passed", "failed", "completed")) \
+                    and not self._passed_by_quiz(crawler):
                 self.col.add("assessment", "error", "Pass / fail result is not sent to the LMS", screenshot=comp.get("panel_shot", ""),
                              box=comp.get("panel_box"), vw=1060)
         quiz_scoring = [x for x in course.scorings if x.get("type") != "view"]

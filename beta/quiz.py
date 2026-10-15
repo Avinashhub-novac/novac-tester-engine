@@ -24,7 +24,9 @@ NUM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "se
 def assessment_parts(course):
     """(rules slides, question slides, results slides) of the course's assessment, in story order."""
     slides = course.slides
-    quiz = [s for s in slides if s.is_quiz]
+    refs = set(getattr(course, "quiz_refs", None) or [])
+    # the graded quiz names its own questions (a knowledge check elsewhere in the course is not part of it)
+    quiz = [s for s in slides if s.id in refs] or [s for s in slides if s.is_quiz]
     if not quiz:
         return [], [], []
     first, last = slides.index(quiz[0]), slides.index(quiz[-1])
@@ -57,6 +59,7 @@ class QuizMixin:
 
     # ---------------------------------------------------------------- one question
     def _options(self, page):
+        self.unscroll(page)
         try:
             return [o for o in page.evaluate(OPTIONS_JS) if not o.get("disabled")]
         except Exception:
@@ -81,6 +84,11 @@ class QuizMixin:
                 page.mouse.click(o["x"], o["y"])
                 page.wait_for_timeout(900)
                 return o["label"]
+        b = self._named_box(page, words)   # a button drawn as a shape on the slide
+        if b:
+            self.click_box(page, b)
+            page.wait_for_timeout(900)
+            return words[0]
         return None
 
     def _region_changed(self, before_png, page, box):
@@ -151,7 +159,11 @@ class QuizMixin:
 
     def answer_question(self, page, sid, i=0):
         """Desktop walk: answer with option i and go on. Returns the slide reached, or None when there are no options."""
-        if not self._options(page):
+        for _ in range(10):   # the options may still be flying in with the slide's entrance
+            if self._options(page):
+                break
+            page.wait_for_timeout(1500)
+        else:
             return None
         self.select_option(page, i)
         self.submit_answer(page)
@@ -168,8 +180,238 @@ class QuizMixin:
         rules, quiz, results = assessment_parts(self.course)
         if not quiz:
             return
+        if results and all(q.choices for q in quiz):
+            # the course data says which answer is right: test everything in a few full attempts (no reloads)
+            return self._assessment_fast(browser, rules, quiz, results)
+        return self._assessment_slow(browser, rules, quiz, results)
+
+    # ---------------------------------------------------------------- fast: the answer key is in the course data
+    def _dom_index(self, page, q, k):
+        """Position on screen of answer k of question q (options may be shuffled)."""
+        opts = self._options(page)
+        obj = q.choices[k]["obj"] if k < len(q.choices) else ""
+        for i, o in enumerate(opts):
+            if o.get("mid") and o["mid"] == obj:
+                return i, opts
+        return (k if k < len(opts) else None), opts
+
+    def _assessment_fast(self, browser, rules, quiz, results):
         ctx = browser.new_context(viewport={"width": 1366, "height": 768}, device_scale_factor=2)
         page = self.open(ctx, "assessment")
+        A = self.assessment = {"questions": [], "scenarios": [], "rules": {}, "pass_mark": None,
+                               "rules_ids": [s.id for s in rules], "quiz_ids": [s.id for s in quiz],
+                               "results_ids": [s.id for s in results], "layer_shots": {}}
+        A["rules"] = stated_rules(" ".join(" ".join(s.texts) for s in rules))
+        scoring = next((x for x in self.course.scorings if x.get("type") not in (None, "view")), None) or {}
+        A["pass_mark"] = scoring.get("passPercent")
+        attempts = A["rules"].get("attempts")
+        cap = min(6, attempts + 1) if attempts else 3      # attempts played after the first failed one ends
+        asked = self.course.asked(quiz)
+        runs = 1 + cap
+        self._aprog = {"base": 0, "total": runs * asked + 2, "n": 0}
+        rules_shot = ""
+        if rules and self.goto_slide(page, rules[0].id) == rules[0].id:
+            self.settle_timeline(page)
+            rules_shot = self.shot(page, f"{rules[0].id}_rules")
+        qinfo = {}
+        for q in quiz:
+            key = [k for k, c in enumerate(q.choices) if c["correct"]]
+            qinfo[q.id] = {"sid": q.id, "label": q.label, "kind": "choice", "shot": "", "key": key,
+                           "options": [{"label": c["text"] or f"Option {k + 1}", "selectable": None, "feedback": "",
+                                        "feedback_text": "", "shot": "", "box": None} for k, c in enumerate(q.choices)]}
+            A["questions"].append(qinfo[q.id])
+        state = {"blank_done": False}
+
+        def first_look(sid, q):
+            """First time a question shows: picture it and check every option can be selected."""
+            qi = qinfo[sid]
+            if qi["shot"]:
+                return
+            qi["shot"] = self.shot(page, f"{sid}_question")
+            for k in range(len(q.choices)):
+                i, opts = self._dom_index(page, q, k)
+                rec = qi["options"][k]
+                if i is None:
+                    rec["selectable"] = False
+                    continue
+                o, ok = self.select_option(page, i)
+                rec["selectable"], rec["box"] = ok, (o or {}).get("box")
+                if not ok:
+                    rec["shot"] = self.shot(page, f"{sid}_opt{k}")
+                    self.col.add("assessment", "error", "Answer option cannot be selected", slide_id=sid, slide_label=q.label,
+                                 detail=f"Option: “{rec['label']}”", screenshot=rec["shot"], box=rec["box"], vw=1366,
+                                 found_in="Assessment", fix="Make this option clickable so the learner can choose it.")
+
+        def blank_submit(sid, q):
+            fb, _ = self.submit_answer(page)
+            here = self.identify(self.settle(page, 400))
+            shot = self.shot(page, f"{sid}_blank")
+            ok = fb == "Answer required" or (here == sid and fb in ("No feedback", "No Submit button"))
+            A["scenarios"].append({"name": "Submit without choosing an answer",
+                                   "steps": f"Open {q.label}, press Submit without selecting any option.",
+                                   "expected": "The learner is asked to choose an answer and stays on the question.",
+                                   "actual": {"Answer required": "A message asks to choose an answer.",
+                                              "No Submit button": "Submit is not available until an option is chosen."}.get(
+                                       fb, "Stayed on the question." if here == sid else f"Moved on to {self.label(here)}."),
+                                   "result": "Pass" if ok else "Fail", "shot": shot})
+            if not ok:
+                self.col.add("assessment", "error", "The question can be submitted without choosing an answer", slide_id=sid,
+                             slide_label=q.label, screenshot=shot, vw=1366, found_in="Assessment",
+                             fix="Ask the learner to choose an answer before Submit is accepted.")
+            self.dismiss_prompts(page)
+            return ok and here == sid
+
+        def play(mode, run_no, retry_box=None):
+            out = {"answers": [], "end_sid": "", "text": "", "shot": "", "lms": {}, "retry": None, "start_sid": "", "cleared": True}
+            if retry_box:
+                self.click_box(page, retry_box)
+                sid = self.identify(self.settle(page))
+                out["start_sid"], out["start_shot"] = sid, self.shot(page, f"retry{run_no}_start_{sid}")
+                out["cleared"] = not any(o.get("checked") for o in self._options(page))
+                if not self.is_first_question(sid, quiz):
+                    out["end_sid"] = sid
+                    return out
+            else:
+                self.fresh(page)
+                sid = self.start_quiz(page, quiz)
+                if not sid:
+                    out["end_sid"] = self.identify(self.state(page))
+                    return out
+                out["start_sid"] = sid
+            qids = {x.id for x in quiz}
+            for _ in range(len(quiz) * 2 + 2):
+                self.check_time()
+                if sid not in qids:
+                    break
+                q = self.course.by_id(sid)
+                self.settle_timeline(page)
+                for _w in range(10):   # options may still be flying in
+                    if self._options(page):
+                        break
+                    page.wait_for_timeout(1000)
+                if not state["blank_done"]:
+                    state["blank_done"] = True
+                    if not blank_submit(sid, q):
+                        return None   # the blank answer was taken: start this attempt again
+                first_look(sid, q)
+                right = [k for k, c in enumerate(q.choices) if c["correct"]]
+                wrong = [k for k, c in enumerate(q.choices) if not c["correct"]]
+                k = right[0] if mode == "right" or not wrong else wrong[run_no % len(wrong)]
+                i, _ = self._dom_index(page, q, k)
+                self.select_option(page, i if i is not None else 0)
+                fb, text = self.submit_answer(page)
+                rec = qinfo[sid]["options"][k]
+                if not rec["feedback"]:
+                    rec["feedback"], rec["feedback_text"] = fb, text
+                    rec["shot"] = self.shot(page, f"{sid}_fb{k}")
+                    try:
+                        from .player import TEXTBOX_JS
+                        A["layer_shots"].setdefault(sid, []).append({"shot": rec["shot"], "boxes": page.evaluate(TEXTBOX_JS)})
+                    except Exception:
+                        pass
+                    want = "Correct" if k in right else "Incorrect"
+                    if fb in ("Correct", "Incorrect") and fb != want:
+                        msg = "The right answer is marked as wrong" if want == "Correct" else "A wrong answer is accepted as right"
+                        self.col.add("assessment", "error", msg, slide_id=sid, slide_label=q.label,
+                                     detail=f"Option: “{rec['label']}”. Feedback shown: {fb}.", screenshot=rec["shot"], vw=1366,
+                                     found_in="Assessment", fix="Set the right answer in the question settings and check its feedback.")
+                out["answers"].append((sid, k, fb))
+                new = self.leave_feedback(page, sid)
+                if new == sid:   # a second try on the same question: answer the same way again
+                    self.select_option(page, i if i is not None else 0)
+                    self.submit_answer(page)
+                    new = self.leave_feedback(page, sid)
+                    if new == sid:
+                        break
+                sid = new
+                ap = self._aprog
+                ap["n"] += 1
+                self.tick("assessment", min(ap["n"], ap["total"] - 1), ap["total"])
+            page.wait_for_timeout(2500)   # the result reaches the LMS a moment after the results screen opens
+            out["end_sid"] = sid
+            out["text"] = self._screen_text(page)[:1500]
+            out["shot"] = self.shot(page, f"result_{mode}_{run_no}_{sid}")
+            lms = page.evaluate(LMS_JS) or {}
+            store = lms.get("store") or {}
+            g = lambda *ks: next((store[k] for k in ks if store.get(k)), "")
+            out["lms"] = {"score": g("cmi.core.score.raw", "cmi.score.raw"), "score_max": g("cmi.core.score.max", "cmi.score.max"),
+                          "status": g("cmi.core.lesson_status", "cmi.success_status", "cmi.completion_status"),
+                          "success": g("cmi.success_status"), "completion": g("cmi.completion_status")}
+            for o in self._clickables(page):
+                if RETRY_RE.match(o.get("label") or ""):
+                    out["retry"] = self._obox(o)
+                    break
+            if out["retry"] is None:
+                b = self._named_box(page, ["retry", "retake", "try again", "retake assessment", "retry quiz"])
+                out["retry"] = b
+            return out
+
+        pm = A["pass_mark"] if A["pass_mark"] is not None else A["rules"].get("pass_mark")
+        r = play("right", 0)
+        if r is None:
+            r = play("right", 0)
+        if r:
+            self._judge(A, r, "All answers correct", "pass", pm, quiz)
+        r = play("wrong", 0)
+        if r:
+            self._judge(A, r, "All answers wrong", "fail", pm, quiz)
+        if r and r.get("retry") is not None and r["end_sid"] in A["results_ids"]:
+            tries = 1
+            while r.get("retry") and tries < cap:
+                tries += 1
+                r2 = play("wrong", tries - 1, retry_box=r["retry"])
+                landed_ok = self.is_first_question(r2.get("start_sid"), quiz)
+                A["scenarios"].append({"name": f"Retry – attempt {tries}", "steps": "On the results screen press Retry.",
+                                       "expected": "The assessment starts again with no answers selected.",
+                                       "actual": f"Opened {self.label(r2.get('start_sid'))}" + ("" if r2.get("cleared", True) else ", previous answers still selected") + ".",
+                                       "result": "Pass" if landed_ok and r2.get("cleared", True) else "Fail", "shot": r2.get("start_shot", "")})
+                if not landed_ok:
+                    self.col.add("assessment", "error", "Retry does not start the assessment again", slide_id=r["end_sid"],
+                                 slide_label=self.label(r["end_sid"]), screenshot=r.get("shot", ""), vw=1366, found_in="Assessment",
+                                 detail=f"Retry opened {self.label(r2.get('start_sid'))}", fix="Retry should open the first question.")
+                    break
+                r = r2
+            A["attempts_seen"] = tries
+            if attempts:
+                ok = tries == attempts
+                A["scenarios"].append({"name": "Number of attempts",
+                                       "steps": "Fail the assessment and press Retry until it is no longer offered.",
+                                       "expected": f"{attempts} attempt{'s' if attempts != 1 else ''} (as the rules screen says).",
+                                       "actual": f"{tries} attempt{'s' if tries != 1 else ''} allowed" + (" (or more)" if tries >= cap and not ok else "") + ".",
+                                       "result": "Pass" if ok else "Fail", "shot": r.get("shot", "")})
+                if not ok:
+                    self.col.add("assessment", "error", "Number of attempts is different from the rules screen",
+                                 slide_id=r["end_sid"], slide_label=self.label(r["end_sid"]), screenshot=r.get("shot", ""), vw=1366,
+                                 detail=f"Rules screen: {attempts} attempts. Course allows: {tries}.", found_in="Assessment",
+                                 fix=f"Allow exactly {attempts} attempts, or correct the rules screen.")
+        # questions a question bank did not draw in any attempt
+        for qi in A["questions"]:
+            if not qi["shot"]:
+                qi["kind"], qi["note"], qi["options"] = "not drawn", "Not drawn in the tested attempts (question bank)", []
+        n_rules = A["rules"].get("questions")
+        if n_rules and n_rules != asked:
+            sid = rules[0].id if rules else quiz[0].id
+            self.col.add("assessment", "error", "Number of questions is different from the rules screen", slide_id=sid,
+                         slide_label=self.label(sid), screenshot=rules_shot, vw=1366, found_in="Assessment",
+                         detail=f"Rules screen: {n_rules} questions. Assessment asks: {asked}.",
+                         fix="Make the number of questions match the rules screen.")
+        if A["rules"].get("pass_mark") and A["pass_mark"] is not None and A["rules"]["pass_mark"] != A["pass_mark"]:
+            sid = rules[0].id if rules else quiz[0].id
+            self.col.add("assessment", "error", "Pass mark on the rules screen is different from the course setting", slide_id=sid,
+                         slide_label=self.label(sid), screenshot=rules_shot, vw=1366, found_in="Assessment",
+                         detail=f"Rules screen: {A['rules']['pass_mark']}%. Course setting: {A['pass_mark']}%.",
+                         fix="Use the same pass mark on the rules screen and in the course settings.")
+        self.col.ran("assessment")
+        ctx.close()
+
+    # ---------------------------------------------------------------- slow: right answers found by trying each option
+    def _assessment_slow(self, browser, rules, quiz, results):
+        ctx = browser.new_context(viewport={"width": 1366, "height": 768}, device_scale_factor=2)
+        page = self.open(ctx, "assessment")
+        rules_shot = ""
+        if rules and self.goto_slide(page, rules[0].id) == rules[0].id:
+            self.settle_timeline(page)
+            rules_shot = self.shot(page, f"{rules[0].id}_rules")
         A = self.assessment = {"questions": [], "scenarios": [], "rules": {}, "pass_mark": None,
                                "rules_ids": [s.id for s in rules], "quiz_ids": [s.id for s in quiz],
                                "results_ids": [s.id for s in results]}
@@ -177,14 +419,18 @@ class QuizMixin:
         A["rules"] = stated_rules(rules_text)
         scoring = next((x for x in self.course.scorings if x.get("type") not in (None, "view")), None) or {}
         A["pass_mark"] = scoring.get("passPercent")
-        total_steps = sum(4 for _ in quiz) + 4
+        # progress: ~4 options per question, then the full attempts (each answers every asked question)
+        asked = self.course.asked(quiz) if hasattr(self.course, "asked") else len(quiz)
+        runs = 2 + max(0, min(5, (A["rules"].get("attempts") or 3) - 1))
+        total_steps = sum(4 for _ in quiz) + 4 + runs * asked
         step = 0
+        self._aprog = {"base": sum(4 for _ in quiz) + 4, "total": total_steps, "n": 0}
         # 1. every option of every question: can it be selected, and what feedback does it give
         for q in quiz:
             self.check_time()
             qi = {"sid": q.id, "label": q.label, "options": [], "kind": "choice", "shot": ""}
             A["questions"].append(qi)
-            if self.goto_slide(page, q.id) != q.id:
+            if not self.open_question(page, q):
                 qi["kind"] = "not reached"
                 continue
             self.settle_timeline(page)
@@ -199,7 +445,7 @@ class QuizMixin:
                 self.tick("assessment", min(step, total_steps - 1), total_steps)
                 if i:
                     self.fresh(page)
-                    if self.goto_slide(page, q.id) != q.id:
+                    if not self.open_question(page, q):
                         break
                     self.settle_timeline(page)
                 o, ok = self.select_option(page, i)
@@ -220,7 +466,7 @@ class QuizMixin:
                 rec["shot"] = self.shot(page, f"{q.id}_fb{i}")
                 try:   # feedback text, so language issues in it can be shown where it appears
                     from .player import TEXTBOX_JS
-                    self.visits.setdefault(q.id, {}).setdefault("layer_shots", []).append(
+                    A.setdefault("layer_shots", {}).setdefault(q.id, []).append(
                         {"shot": rec["shot"], "boxes": page.evaluate(TEXTBOX_JS)})
                 except Exception:
                     pass
@@ -235,12 +481,13 @@ class QuizMixin:
         # 2. Submit with nothing selected
         q0 = quiz[0]
         self.fresh(page)
-        if self.goto_slide(page, q0.id) == q0.id and self._options(page):
+        if self.open_question(page, q0) and self._options(page):
             self.settle_timeline(page)
             fb, text = self.submit_answer(page)
             here = self.identify(self.settle(page, 400))
             shot = self.shot(page, f"{q0.id}_blank")
-            ok = fb == "Answer required" or (here == q0.id and fb == "No feedback")
+            # stays on the question with no feedback, or Submit is not offered until an option is chosen
+            ok = fb == "Answer required" or (here == q0.id and fb in ("No feedback", "No Submit button"))
             A["scenarios"].append({"name": "Submit without choosing an answer",
                                    "steps": f"Open {q0.label}, press Submit without selecting any option.",
                                    "expected": "The learner is asked to choose an answer and stays on the question.",
@@ -278,10 +525,11 @@ class QuizMixin:
             # retries
             if r.get("retry") is not None and r["end_sid"] in A["results_ids"]:
                 tries = 1
-                while r.get("retry") and tries < 6:
+                cap = min(6, attempts + 1) if attempts else 3
+                while r.get("retry") and tries < cap:
                     tries += 1
                     r2 = self._attempt(page, quiz, "wrong", keys, nopt, page_ready=True, retry_box=r["retry"])
-                    landed_ok = r2.get("start_sid") == quiz[0].id
+                    landed_ok = self.is_first_question(r2.get("start_sid"), quiz)
                     A["scenarios"].append({"name": f"Retry – attempt {tries}",
                                            "steps": "On the results screen press Retry.",
                                            "expected": f"The assessment starts again at {quiz[0].label} with no answers selected.",
@@ -313,20 +561,56 @@ class QuizMixin:
                                    "result": "Not tested", "shot": ""})
         # 4. the rules screen against the course
         n_rules = A["rules"].get("questions")
-        if n_rules and n_rules != len(quiz):
+        n_asked = self.course.asked(quiz) if hasattr(self.course, "asked") else len(quiz)
+        if n_rules and n_rules != n_asked:
             sid = rules[0].id if rules else quiz[0].id
             self.col.add("assessment", "error", "Number of questions is different from the rules screen", slide_id=sid,
-                         slide_label=self.label(sid), screenshot=self.visits.get(sid, {}).get("shot", ""), vw=1366, found_in="Assessment",
-                         detail=f"Rules screen: {n_rules} questions. Assessment has: {len(quiz)}.",
+                         slide_label=self.label(sid), screenshot=rules_shot, vw=1366, found_in="Assessment",
+                         detail=f"Rules screen: {n_rules} questions. Assessment asks: {n_asked}.",
                          fix="Make the number of questions match the rules screen.")
         if A["rules"].get("pass_mark") and A["pass_mark"] is not None and A["rules"]["pass_mark"] != A["pass_mark"]:
             sid = rules[0].id if rules else quiz[0].id
             self.col.add("assessment", "error", "Pass mark on the rules screen is different from the course setting", slide_id=sid,
-                         slide_label=self.label(sid), screenshot=self.visits.get(sid, {}).get("shot", ""), vw=1366, found_in="Assessment",
+                         slide_label=self.label(sid), screenshot=rules_shot, vw=1366, found_in="Assessment",
                          detail=f"Rules screen: {A['rules']['pass_mark']}%. Course setting: {A['pass_mark']}%.",
                          fix="Use the same pass mark on the rules screen and in the course settings.")
         self.col.ran("assessment")
         ctx.close()
+
+    def is_first_question(self, sid, quiz):
+        """The attempt starts on the first question; with a question bank, on any question the bank draws."""
+        if not sid or not quiz:
+            return False
+        if quiz[0].draw:
+            q = self.course.by_id(sid)
+            return bool(q and q.draw == quiz[0].draw)
+        return sid == quiz[0].id
+
+    def open_question(self, page, q):
+        """Opens one question. A question bank draws its questions when the course loads, so a question
+        not drawn this time can be opened only in a new session (a few tries)."""
+        if self.goto_slide(page, q.id) == q.id:
+            return True
+        if not q.draw:
+            return False
+        for _ in range(5):
+            self.fresh(page)
+            if self.jump(page, q.id) == q.id:
+                return True
+        return False
+
+    def start_quiz(self, page, quiz):
+        """Opens the assessment at its start. A question bank is opened through its draw, so the player
+        picks the questions and scores the attempt as it would for a learner."""
+        d = self.course.draws.get(quiz[0].draw) if quiz and quiz[0].draw else None
+        if d:
+            try:
+                page.evaluate(self.JUMP_JS, d["abs"])
+            except Exception:
+                return None
+            sid = self.identify(self.settle(page))
+            return sid if self.is_first_question(sid, quiz) else None
+        return quiz[0].id if self.goto_slide(page, quiz[0].id) == quiz[0].id else None
 
     def _attempt(self, page, quiz, mode, keys, nopt, page_ready=False, retry_box=None):
         """Plays the assessment from the first question. mode 'right' or 'wrong'. Returns what happened at the end."""
@@ -338,14 +622,14 @@ class QuizMixin:
             out["start_sid"] = sid
             out["start_shot"] = self.shot(page, f"retry_start_{sid}")
             out["cleared"] = not any(o.get("checked") for o in self._options(page))
-            if sid != quiz[0].id:
+            if not self.is_first_question(sid, quiz):
                 return out
         else:
             self.fresh(page)
-            if self.goto_slide(page, quiz[0].id) != quiz[0].id:
+            sid = self.start_quiz(page, quiz)
+            if not sid:
                 out["end_sid"] = self.identify(self.state(page))
                 return out
-            sid = quiz[0].id
             out["start_sid"] = sid
         qids = {q.id for q in quiz}
         for _ in range(len(quiz) * 2 + 2):
@@ -367,6 +651,10 @@ class QuizMixin:
                 if new == sid:
                     break
             sid = new
+            ap = getattr(self, "_aprog", None)
+            if ap:
+                ap["n"] += 1
+                self.tick("assessment", min(ap["base"] + ap["n"], ap["total"] - 1), ap["total"])
         page.wait_for_timeout(2500)   # the result is sent to the LMS a moment after the results screen opens
         out["end_sid"] = sid
         out["text"] = self._screen_text(page)[:1500]

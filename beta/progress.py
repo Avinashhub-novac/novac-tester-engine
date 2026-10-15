@@ -11,8 +11,19 @@ import json
 import time
 from pathlib import Path
 
+# The browser checks run in two waves. In each wave the lanes run side by side (one browser each); the passes of a
+# lane run one after another. Wave 2 needs what the walk-through (wave 1) found.
+WAVES = (
+    ("checks1", (("desktop", "restrict", "prev"), ("mobile", "assessment"))),
+    ("checks2", (("buttons",), ("menu",))),
+)
+# order in which each pass's findings are added to the report (fixed, whatever pass finishes first)
+REPORT_ORDER = ("desktop", "restrict", "prev", "menu", "buttons", "assessment", "mobile")
+
 LABELS = {
-    "prepare": "Preparing", "extract": "Opening the course", "desktop": "Playing every screen",
+    "checks1": "Playing every screen, testing the assessment and the phone view",
+    "checks2": "Opening every clickable and checking the menu",
+    "prepare": "Preparing", "extract": "Opening the course", "media": "Preparing videos for playback", "desktop": "Playing every screen",
     "restrict": "Checking restrictions", "prev": "Checking Back buttons", "menu": "Checking the menu",
     "buttons": "Opening and closing every clickable", "assessment": "Testing the assessment", "mobile": "Testing on mobile", "analyse": "Collecting results",
     "video": "Checking the video", "review": "Reviewing text and storyboard", "report": "Making screenshots and report",
@@ -20,12 +31,14 @@ LABELS = {
 }
 
 
-def plan_scorm(slides, passes, play_full, has_sb, transcript):
+def plan_scorm(slides, passes, play_full, has_sb, transcript, media_s=0.0):
     """Planned seconds for each phase of a course test."""
     n = max(1, len(slides))
     play = sum(min(s.duration_ms, 600000) for s in slides) / 1000.0
     words = sum(len(" ".join(s.texts).split()) + len((s.notes or "").split()) for s in slides)
     p = [("extract", 3 + n * 0.2)]
+    if media_s:
+        p.append(("media", media_s))
     est = {   # seconds, measured on sample courses
         "desktop": (play if play_full else n * 2) + n * 4 + 15,
         "restrict": 15 + min(8, n) * 4,
@@ -35,8 +48,12 @@ def plan_scorm(slides, passes, play_full, has_sb, transcript):
         "assessment": sum(1 for s in slides if s.is_quiz) * 45 + 90,
         "mobile": (play * 0.8 if play_full else n * 2) + n * 7 + 10,
     }
-    for name in passes:
-        p.append((name, est.get(name, n * 5)))
+    est["mobile"] = (play * 0.5 if play_full else n * 2) + n * 5 + 10   # fast-forwarded where the seekbar allows
+    est["assessment"] = 60 + 3 * 25 * max(1, sum(1 for s in slides if s.is_quiz) and min(10, sum(1 for s in slides if s.is_quiz)))
+    for wave, lanes in WAVES:
+        lane_s = [sum(est.get(x, n * 5) for x in lane if x in passes) for lane in lanes]
+        if any(lane_s):
+            p.append((wave, max(lane_s)))
     p.append(("analyse", 10 + n * 0.5))
     p += _post(n, words, has_sb, transcript)
     return p

@@ -532,8 +532,9 @@ def _assessment_sheet(wb, res, run_dir):
         opts = q.get("options") or []
         if not opts:
             n += 1
-            note = {"other": "Not a choice question (drag and drop, hotspot or typing): options checked by hand",
-                    "not reached": "The question screen could not be opened"}.get(q.get("kind"), "No answer options found")
+            note = q.get("note") or {"other": "Not a choice question (drag and drop, hotspot or typing): options checked by hand",
+                                     "not reached": "The question screen could not be opened",
+                                     "not drawn": "Not drawn in the tested attempts (question bank)"}.get(q.get("kind"), "No answer options found")
             for j, v in enumerate([n, q["label"], note, "—", "—", "Not tested", ""], 1):
                 c = ws.cell(r, j, v)
                 c.alignment = Alignment(wrap_text=True, vertical="top")
@@ -546,8 +547,8 @@ def _assessment_sheet(wb, res, run_dir):
             continue
         for k, o in enumerate(opts):
             n += 1
-            ok = o["selectable"] and o["feedback"] not in ("No Submit button",)
-            fb = o["feedback"] or "—"
+            ok = bool(o["selectable"]) and o["feedback"] not in ("No Submit button",)
+            fb = o["feedback"] or ("Not submitted (selected only)" if o["selectable"] else "—")
             if k in (q.get("key") or []):
                 fb += " (right answer)"
             vals = [n, q["label"], o["label"], "Yes" if o["selectable"] else "No", fb, "Pass" if ok else "Fail", ""]

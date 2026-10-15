@@ -262,25 +262,41 @@ def _codecs(path):
     return v, a
 
 
-def make_playable(root: Path, log=print):
-    """Re-encodes course media the test browser cannot play. Returns [{file, from, seconds}] for the report."""
-    import time
-    done = []
-    files = sorted(p for p in Path(root).rglob("*") if p.is_file() and p.suffix.lower() in MEDIA_EXT)
+def media_to_prepare(root: Path):
+    """[(path, video codecs, audio codecs, seconds)] of course media the test browser cannot play."""
     todo = []
-    for p in files:
+    for p in sorted(p for p in Path(root).rglob("*") if p.is_file() and p.suffix.lower() in MEDIA_EXT):
         v, a = _codecs(p)
         if (v and any(c not in PLAYABLE_VIDEO for c in v)) or (a and any(c not in PLAYABLE_AUDIO for c in a)):
-            todo.append((p, v, a))
-    if todo:
-        log(f"Preparing {len(todo)} video/audio file{'s' if len(todo) != 1 else ''} so the test browser can play them")
-    for p, v, a in todo:
+            todo.append((p, v, a, duration(probe(p) or {})))
+    return todo
+
+
+def prepare_estimate(todo):
+    """Planned seconds to prepare the media (measured: about 0.6 s per second of 4K video, less for smaller)."""
+    return sum(max(2.0, d * (0.6 if v else 0.05)) for _, v, _, d in todo)
+
+
+def make_playable(root: Path, log=print, todo=None, tick=None):
+    """Re-encodes course media the test browser cannot play. Returns [{file, from, seconds}] for the report.
+    Video is made at most 1280 pixels wide (the size the course is seen at), which keeps large 4K videos quick."""
+    import time
+    done = []
+    todo = media_to_prepare(root) if todo is None else todo
+    total = sum(max(1.0, d) for *_, d in todo) or 1.0
+    so_far = 0.0
+    for k, (p, v, a, dur) in enumerate(todo, 1):
+        mb = p.stat().st_size / 1e6
+        log(f"Preparing video {k} of {len(todo)} for playback ({p.name}, {mb:.0f} MB"
+            + (f", {media_ts(dur)}" if dur else "") + ")")
+        if tick:
+            tick("media", so_far, total)
         t0 = time.time()
         tmp = p.with_name(p.stem + ".__play__" + p.suffix)
-        cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(p), "-map", "0:v?", "-map", "0:a?", "-threads", "4"]
+        cmd = ["ffmpeg", "-y", "-v", "error", "-threads", "0", "-i", str(p), "-map", "0:v?", "-map", "0:a?"]
         if v:
-            cmd += ["-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-row-mt", "1", "-b:v", "0", "-crf", "34",
-                    "-pix_fmt", "yuv420p"]
+            cmd += ["-vf", "scale='min(1280,iw)':-2", "-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8",
+                    "-row-mt", "1", "-b:v", "0", "-crf", "34", "-pix_fmt", "yuv420p"]
         if a:
             cmd += ["-c:a", "libopus", "-b:a", "96k", "-ar", "48000"]
         cmd += ["-movflags", "+faststart", "-f", "mp4", str(tmp)]
@@ -290,6 +306,7 @@ def make_playable(root: Path, log=print):
                 tmp.replace(p)
                 done.append({"file": p.relative_to(root).as_posix(), "from": "/".join(v + a),
                              "seconds": round(time.time() - t0, 1)})
+                so_far += max(1.0, dur)
             else:
                 log(f"Could not prepare {p.name} for playback")
         except Exception as e:
@@ -297,4 +314,11 @@ def make_playable(root: Path, log=print):
         finally:
             if tmp.exists():
                 tmp.unlink()
+    if tick and todo:
+        tick("media", total, total)
     return done
+
+
+def media_ts(sec):
+    sec = int(round(sec or 0))
+    return f"{sec // 60}:{sec % 60:02d} min"
