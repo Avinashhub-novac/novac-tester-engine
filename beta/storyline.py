@@ -59,6 +59,9 @@ class Slide:
     has_interaction: bool = False   # drag-drop, quiz or other activity the learner must finish
     draw: str = ""   # id of the question bank draw this question comes from ("" = a normal screen)
     choices: list = field(default_factory=list)  # [{obj, text, correct}] answer options of a one-answer question (from the course data)
+    drag_items: list = field(default_factory=list)    # [{id, label}] objects the learner drags
+    drop_targets: list = field(default_factory=list)  # [{id, label}] objects items can be dropped on
+    drag_key: dict = field(default_factory=dict)      # drag item id -> right drop target id (drag-and-drop question)
 
     @property
     def abs_id(self):
@@ -410,6 +413,42 @@ def _choices(slide_entry):
     return out
 
 
+def _drag_key(slide_entry):
+    """Drag-and-drop question: which item belongs on which drop target (from its right answer)."""
+    for it in slide_entry.get("interactions") or []:
+        if not isinstance(it, dict) or it.get("type") != "matching":
+            continue
+        for a in it.get("answers") or []:
+            if not isinstance(a, dict) or a.get("status") != "correct":
+                continue
+            key = {}
+            for s in (a.get("evaluate") or {}).get("statements") or []:
+                if isinstance(s, dict) and s.get("kind") == "pair":
+                    item = str(s.get("choiceid") or "").split("choice_", 1)[-1]
+                    target = str(s.get("statementid") or "").split("statement_", 1)[-1]
+                    if item and target:
+                        key[item] = target
+            if key:
+                return key
+    return {}
+
+
+def _drag_objects(slide_json):
+    """Objects the learner can drag, and objects that accept a drop (Storyline's drag-and-drop settings)."""
+    items, targets, seen = [], [], set()
+    for _, d in _walk(slide_json):
+        dd = d.get("dragdrop")
+        if not isinstance(dd, dict) or "id" not in d or str(d["id"]) in seen:
+            continue
+        seen.add(str(d["id"]))
+        o = {"id": str(d["id"]), "label": _label_of(d)}
+        if dd.get("dragenabled"):
+            items.append(o)
+        if dd.get("dropenabled"):
+            targets.append(o)
+    return items, targets
+
+
 # ---------------------------------------------------------------- loader
 def find_launch(root: Path):
     # the LMS launch file first: it is the only one that reports completion
@@ -480,6 +519,7 @@ def load_course(extract_dir: Path) -> Course:
             idx += 1
             course.slides.append(Slide(
                 choices=_choices(sd),
+                drag_key=_drag_key(sd),
                 id=str(sd.get("id", f"slide{idx}")),
                 title=_plain(sd.get("title") or ""),
                 index=idx,
@@ -547,6 +587,9 @@ def load_course(extract_dir: Path) -> Course:
                 s.next_target = course.draws[d]["ids"][0]
         s.click_objects = _click_objects(sj)
         s.close_objects = _close_objects(sj)
+        s.drag_items, s.drop_targets = _drag_objects(sj)
+        if s.drag_items:
+            s.has_interaction = True
         s.object_ids = {str(d["id"]) for _, d in _walk(sj) if "id" in d and isinstance(d.get("id"), (str, int))} - {s.id}
     # the slides the graded quiz scores (a draw stands for all its bank questions)
     for qz in data.get("quizzes") or []:

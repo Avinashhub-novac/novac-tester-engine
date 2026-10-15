@@ -389,7 +389,8 @@ class Crawler(QuizMixin):
                     break
             except Exception:
                 pass
-        for txt in ("No", "Start", "Start Course", "Begin", "Click to start", "Play"):
+        # "Resume / Restart" splash of a course opened before in this browser: a new learner starts again
+        for txt in ("Restart", "No", "Start", "Start Course", "Begin", "Click to start", "Play"):
             try:
                 b = page.get_by_role("button", name=re.compile(rf"^{txt}$", re.I))
                 if b.count() and b.first.is_visible():
@@ -840,6 +841,24 @@ class Crawler(QuizMixin):
                         break
                     prev_sid = sid
                     continue
+            if slide and slide.drag_items and not slide.is_quiz and slide.id not in self.quiz_ids:
+                # a drag-and-drop activity: place every item like a learner, then go on
+                self.settle_timeline(page)
+                placed, fb, _ = self.answer_drag(page, sid, slide, "right")
+                rec["drag"] = {"placed": placed, "feedback": fb}
+                stuck = [p_ for p_ in placed if not p_["moved"]]
+                if stuck:
+                    self.col.add("interactivity", "error", "Item cannot be dragged", slide_id=sid, slide_label=self.label(sid),
+                                 detail="Items: " + ", ".join(f"“{p_['item']}”" for p_ in stuck), found_in="Interactivity",
+                                 screenshot=self.shot(page, f"{sid}_drag_stuck"), vw=1366,
+                                 fix="Make every item draggable so the learner can place it.")
+                if fb != "No Submit button":
+                    new = self.leave_feedback(page, sid)
+                    if new and new != sid and not new.startswith("unknown"):
+                        carry, prev_sid = new, sid
+                        self.col.ran("navigation")
+                        continue
+                st = self.state(page)
             start_nav = self.slide_nav(page, slide, "forward") if welcome and st["nextExists"] and st["nextDisabled"] else None
 
             if not st["nextExists"] or start_nav:
@@ -870,6 +889,7 @@ class Crawler(QuizMixin):
                                 continue
                             self._block(sid, "No way to go to the next screen (no Next button and no button that moves on)")
                             break
+                        self._activity_unfinished(sid)
                         if not self._jump_on(page, sid, slide, None, None):
                             break
                         prev_sid = sid
@@ -943,6 +963,7 @@ class Crawler(QuizMixin):
                         break
                     if slide and slide.has_interaction:   # an activity the tester cannot finish (drag and drop): go on
                         rec["note"] = "Activity could not be completed by the tester; the next screen was opened directly"
+                        self._activity_unfinished(sid)
                         ok = self._jump_on(page, sid, slide, None, None)
                     elif self._locked_by_items(sid, slide):
                         ok = self._jump_on(page, sid, slide, None, None)
@@ -1423,6 +1444,15 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             page.wait_for_timeout(400)
             return True
         return False
+
+    def _activity_unfinished(self, sid):
+        """An activity the tester could not finish: say so in the report (never silently skipped)."""
+        if sid in self.quiz_ids or sid in self.results_ids:
+            return
+        self.col.add("interactivity", "warning", "Activity could not be completed by the tester – check by hand",
+                     slide_id=sid, slide_label=self.label(sid), screenshot=self.visits.get(sid, {}).get("shot", ""),
+                     found_in="Interactivity", detail="The tester opened the next screen directly and carried on.",
+                     fix="Check this activity by hand: complete it and confirm the way forward opens.")
 
     def _locked_by_items(self, sid, slide):
         """Next stays locked although every clickable item was opened: report it and carry on (never stop the test)."""
@@ -2037,6 +2067,9 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                     if b and not any(inside({"x": b[0] + b[2] / 2, "y": b[1] + b[3] / 2}, nb) for nb in nav_boxes):
                         objs.append(self._as_obj(co["label"] or "", b))
                 objs = objs[: self.max_buttons]
+            if s and s.drag_items:   # drag items are dragged (walk-through / assessment), not clicked
+                dboxes = [b for b in (self._box_of(page, x["id"]) for x in s.drag_items + s.drop_targets) if b]
+                objs = [o for o in objs if not any(inside(o, b) for b in dboxes)]
             if sid in self.quiz_ids or sid in self.results_ids or (s and s.is_quiz):
                 objs = []   # questions (also knowledge checks), results and Retry are tested with the questions
             found_objs += len(objs)

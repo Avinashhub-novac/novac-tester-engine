@@ -157,8 +157,73 @@ class QuizMixin:
             here = self.identify(self.settle(page))
         return here
 
+    # ---------------------------------------------------------------- drag and drop
+    def drag_to(self, page, item_id, target_id):
+        """Drags one item onto a drop target like a learner (press, move, release).
+        Returns {moved, placed} or None when either is not on screen."""
+        a = self._visible_box(page, item_id) or self._box_of(page, item_id)
+        b = self._box_of(page, target_id)
+        if not a or not b:
+            return None
+        sx, sy = a[0] + a[2] / 2, a[1] + a[3] / 2
+        tx, ty = b[0] + b[2] / 2, b[1] + b[3] / 2
+        page.mouse.move(sx, sy)
+        page.mouse.down()
+        for k in range(1, 13):
+            page.mouse.move(sx + (tx - sx) * k / 12, sy + (ty - sy) * k / 12)
+            page.wait_for_timeout(25)
+        page.mouse.up()
+        page.wait_for_timeout(600)
+        a2 = self._box_of(page, item_id)
+        if not a2:
+            return {"moved": True, "placed": True}   # some items disappear once dropped
+        cx, cy = a2[0] + a2[2] / 2, a2[1] + a2[3] / 2
+        pad = 12
+        return {"moved": abs(cx - sx) > 8 or abs(cy - sy) > 8,
+                "placed": b[0] - pad <= cx <= b[0] + b[2] + pad and b[1] - pad <= cy <= b[1] + b[3] + pad}
+
+    def solve_drag(self, page, slide, mode="right", rot=0):
+        """Places every drag item. mode "right": on its right target (from the course data; without it, each target is
+        tried until one keeps the item). mode "wrong": every item on a wrong target. Returns [{item, target, moved, placed}]."""
+        targets = [x["id"] for x in slide.drop_targets]
+        names = {x["id"]: x["label"] for x in slide.drop_targets}
+        key, out, used = slide.drag_key or {}, [], set()
+        for k, it in enumerate(slide.drag_items):
+            self.check_time()
+            want = key.get(it["id"])
+            if want and mode == "right":
+                tries = [want]
+            elif want:
+                others = [x for x in targets if x != want] or [want]
+                tries = [others[(k + rot) % len(others)]]
+            else:   # no answer key: try each free target until one keeps the item
+                tries = [x for x in targets if x not in used] + [x for x in targets if x in used]
+            res, tgt = None, None
+            for tg in tries[:6]:
+                res, tgt = self.drag_to(page, it["id"], tg), tg
+                if res and res["placed"]:
+                    break
+            if res and res["placed"]:
+                used.add(tgt)
+            out.append({"item": it["label"] or it["id"], "target": names.get(tgt, tgt or ""), "moved": bool(res and res["moved"]),
+                        "placed": bool(res and res["placed"])})
+        return out
+
+    def answer_drag(self, page, sid, slide, mode="right", rot=0):
+        """A drag-and-drop screen: place the items, press Submit if there is one, read the feedback."""
+        placed = self.solve_drag(page, slide, mode, rot)
+        fb, text = ("No Submit button", "")
+        if self._submit_box(page) or self._named_box(page, ["submit"]):
+            fb, text = self.submit_answer(page)
+        return placed, fb, text
+
     def answer_question(self, page, sid, i=0):
         """Desktop walk: answer with option i and go on. Returns the slide reached, or None when there are no options."""
+        slide = self.course.by_id(sid)
+        if slide and slide.drag_items and not self._options(page):
+            self.settle_timeline(page)
+            self.answer_drag(page, sid, slide, "right")
+            return self.leave_feedback(page, sid)
         for _ in range(10):   # the options may still be flying in with the slide's entrance
             if self._options(page):
                 break
@@ -172,6 +237,10 @@ class QuizMixin:
     # ---------------------------------------------------------------- the pass
     def fresh(self, page):
         """A new learner session: reload the course (the test LMS starts empty again)."""
+        try:   # nothing remembered from the earlier attempt (the player keeps "resume" data in the browser)
+            page.evaluate("() => { try { localStorage.clear(); sessionStorage.clear(); } catch (e) {} }")
+        except Exception:
+            pass
         page.reload(wait_until="load", timeout=90000)
         self._ready(page)
         self.dismiss_prompts(page)
@@ -180,7 +249,7 @@ class QuizMixin:
         rules, quiz, results = assessment_parts(self.course)
         if not quiz:
             return
-        if results and all(q.choices for q in quiz):
+        if results and all(q.choices or q.drag_key for q in quiz):
             # the course data says which answer is right: test everything in a few full attempts (no reloads)
             return self._assessment_fast(browser, rules, quiz, results)
         return self._assessment_slow(browser, rules, quiz, results)
@@ -215,10 +284,19 @@ class QuizMixin:
             rules_shot = self.shot(page, f"{rules[0].id}_rules")
         qinfo = {}
         for q in quiz:
-            key = [k for k, c in enumerate(q.choices) if c["correct"]]
-            qinfo[q.id] = {"sid": q.id, "label": q.label, "kind": "choice", "shot": "", "key": key,
-                           "options": [{"label": c["text"] or f"Option {k + 1}", "selectable": None, "feedback": "",
-                                        "feedback_text": "", "shot": "", "box": None} for k, c in enumerate(q.choices)]}
+            if q.drag_key and not q.choices:
+                names = {x["id"]: x["label"] for x in q.drop_targets}
+                pairs = ", ".join(f"{i['label']} → {names.get(q.drag_key.get(i['id']), '?')}" for i in q.drag_items)
+                qinfo[q.id] = {"sid": q.id, "label": q.label, "kind": "drag", "shot": "", "key": [0],
+                               "options": [{"label": f"Every item on its right place ({pairs})", "selectable": None, "feedback": "",
+                                            "feedback_text": "", "shot": "", "box": None},
+                                           {"label": "Items on wrong places", "selectable": None, "feedback": "",
+                                            "feedback_text": "", "shot": "", "box": None}]}
+            else:
+                key = [k for k, c in enumerate(q.choices) if c["correct"]]
+                qinfo[q.id] = {"sid": q.id, "label": q.label, "kind": "choice", "shot": "", "key": key,
+                               "options": [{"label": c["text"] or f"Option {k + 1}", "selectable": None, "feedback": "",
+                                            "feedback_text": "", "shot": "", "box": None} for k, c in enumerate(q.choices)]}
             A["questions"].append(qinfo[q.id])
         state = {"blank_done": False}
 
@@ -228,6 +306,8 @@ class QuizMixin:
             if qi["shot"]:
                 return
             qi["shot"] = self.shot(page, f"{sid}_question")
+            if qi["kind"] == "drag":
+                return   # whether each item can be dragged is seen when the items are placed
             for k in range(len(q.choices)):
                 i, opts = self._dom_index(page, q, k)
                 rec = qi["options"][k]
@@ -294,6 +374,39 @@ class QuizMixin:
                     if not blank_submit(sid, q):
                         return None   # the blank answer was taken: start this attempt again
                 first_look(sid, q)
+                if qinfo[sid]["kind"] == "drag":
+                    k = 0 if mode == "right" else 1
+                    placed, fb, text = self.answer_drag(page, sid, q, mode, run_no)
+                    rec = qinfo[sid]["options"][k]
+                    stuck = [p for p in placed if not p["moved"]]
+                    if rec["selectable"] is None:
+                        rec["selectable"] = not stuck
+                        if stuck:
+                            self.col.add("assessment", "error", "Item cannot be dragged", slide_id=sid, slide_label=q.label,
+                                         detail="Items: " + ", ".join(f"“{p['item']}”" for p in stuck),
+                                         screenshot=self.shot(page, f"{sid}_drag_stuck"), vw=1366, found_in="Assessment",
+                                         fix="Make every item draggable so the learner can place it.")
+                    if not rec["feedback"]:
+                        rec["feedback"], rec["feedback_text"] = fb, text
+                        rec["shot"] = self.shot(page, f"{sid}_fb{k}")
+                        want = "Correct" if mode == "right" else "Incorrect"
+                        if fb in ("Correct", "Incorrect") and fb != want:
+                            msg = "Right placement is marked as wrong" if want == "Correct" else "Wrong placement is accepted as right"
+                            self.col.add("assessment", "error", msg, slide_id=sid, slide_label=q.label,
+                                         detail=f"Feedback shown: {fb}.", screenshot=rec["shot"], vw=1366, found_in="Assessment",
+                                         fix="Set the right drop target for every item in the question settings.")
+                    out["answers"].append((sid, k, fb))
+                    new = self.leave_feedback(page, sid)
+                    if new == sid:
+                        self.answer_drag(page, sid, q, mode, run_no)
+                        new = self.leave_feedback(page, sid)
+                        if new == sid:
+                            break
+                    sid = new
+                    ap = self._aprog
+                    ap["n"] += 1
+                    self.tick("assessment", min(ap["n"], ap["total"] - 1), ap["total"])
+                    continue
                 right = [k for k, c in enumerate(q.choices) if c["correct"]]
                 wrong = [k for k, c in enumerate(q.choices) if not c["correct"]]
                 k = right[0] if mode == "right" or not wrong else wrong[run_no % len(wrong)]
