@@ -13,7 +13,7 @@ import re
 import subprocess
 from pathlib import Path
 
-RELEASE = "1.3.0"
+RELEASE = "1.4.0"
 MODEL = "claude-opus-5-5"
 
 # Exact versions the release was built and tested with.
@@ -50,7 +50,7 @@ def tool_versions():
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
-            b = p.chromium.launch()
+            b = p.chromium.launch(channel="chromium")
             v["chromium"] = b.version
             b.close()
     except Exception as e:
