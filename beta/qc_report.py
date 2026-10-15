@@ -426,7 +426,7 @@ def _header(ws, row, names, widths):
 
 def _result_cell(c):
     v = str(c.value or "")
-    col = GREEN if v.startswith("Pass") or v == "Yes" else RED if v.startswith("Fail") or v.startswith("No") and v != "No clickable items" else GREY
+    col = GREEN if v.startswith("Pass") or v == "Yes" else RED if v.startswith("Fail") or v.startswith("No") and not v.startswith(("No clickable", "No menu")) else GREY
     if v.startswith("Pass") or v.startswith("Fail"):
         c.font = Font(bold=True, color=col[1])
     c.fill = PatternFill("solid", fgColor=col[0])
@@ -459,20 +459,20 @@ def _nav_sheet(wb, res, run_dir):
     failed = sum(1 for r in rows if str(r["result"]).startswith("Fail"))
     ws["A3"] = f"Screens: {len(rows)}   ·   Pass: {passed}   ·   Fail: {failed}   ·   Not tested: {len(rows) - passed - failed}"
     ws["A3"].font = Font(bold=True)
-    names = ["Screen No", "Screen title", "Screenshot", "Reached by Next", "Next / forward", "Back", "Menu",
-             "Clickables (open & close)", "Swipe next (phone)", "Swipe previous (phone)", "Result", "Notes"]
-    widths = [10, 26, 47, 14, 14, 12, 12, 22, 18, 18, 14, 44]
+    names = ["Screen No", "Screen title", "Screenshot", "Next Working Status", "Previous Working Status",
+             "Mobile Swipe Next Status", "Mobile Swipe Previous Status", "Menu", "Clickable"]
+    widths = [10, 26, 47, 18, 18, 20, 20, 16, 26]
     _header(ws, 5, names, widths)
     slides = {s["id"]: s for s in res.get("slides", [])}
     r = 6
     for row in rows:
-        vals = [row["index"], row["title"], "", row["reached"], row["next"], row["back"], row["menu"], row["clicks"],
-                row.get("swipe_next", "—"), row.get("swipe_back", "—"), row["result"], row["notes"]]
+        vals = [row["index"], row["title"], "", row["next"], row["back"], row.get("swipe_next", "—"),
+                row.get("swipe_back", "—"), row["menu"], row["clicks"]]
         for j, v in enumerate(vals, 1):
             c = ws.cell(r, j, v)
-            c.alignment = Alignment(wrap_text=True, vertical="top", horizontal="center" if j not in (2, 12) else None)
+            c.alignment = Alignment(wrap_text=True, vertical="top", horizontal="center" if j != 2 else None)
             c.border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
-            if j in (4, 5, 6, 7, 8, 9, 10, 11):
+            if j >= 4:
                 _result_cell(c)
         img_h = 0
         th = _thumb(run_dir, (slides.get(row["sid"]) or {}).get("shot", ""), 330)

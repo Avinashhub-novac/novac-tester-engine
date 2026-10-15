@@ -388,7 +388,7 @@ class Run:
                 dead = sum(1 for i in c["items"] if not i["opened"])
                 stuck = sum(1 for i in c["items"] if i["closed"] is False)
                 if not click_f:
-                    clicks = f"Pass ({n} item{'s' if n != 1 else ''} opened" + (" and closed)" if any(i["closed"] for i in c["items"]) else ")") if n else "No clickable items"
+                    clicks = f"Pass ({n} item{'s' if n != 1 else ''} opened" + (" and closed)" if any(i["closed"] for i in c["items"]) else ")") if n else "No clickable present"
                 else:
                     bits = [f"{dead} of {n} did nothing" if dead else "", f"{stuck} pop-up{'s' if stuck != 1 else ''} did not close" if stuck else "",
                             c.get("rule") or ""]
@@ -396,7 +396,7 @@ class Run:
             elif s.id in crawler.quiz_ids:
                 clicks = "See Assessment tab"
             else:
-                clicks = "Fail" if click_f else ("Not tested" if "buttons" not in passes or crawler.blocked else "No clickable items")
+                clicks = "Fail" if click_f else ("Not tested" if "buttons" not in passes or crawler.blocked else "No clickable present")
             row = {"sid": s.id, "index": s.index, "title": s.title, "label": s.label,
                    "reached": "Not tested (testing stopped)" if after_stop else ("Yes" if reached else (
                        "Question bank – not drawn in this attempt" if s.draw else ("No – opened directly" if v.get("via_jump") else "No"))),
@@ -413,7 +413,12 @@ class Run:
                    "notes": "; ".join(dict.fromkeys(plain(f.message)[0] for f in fs))[:600] + (("; " if fs else "") + v["note"] if v.get("note") else "")}
             if is_welcome(s):
                 row["notes"] = (row["notes"] + "; " if row["notes"] else "") + "Welcome screen: no Back/Next expected (START moves on)"
-            if s.id in crawler.quiz_ids or s.id in crawler.results_ids:
+            if (s.id in crawler.quiz_ids or s.id in crawler.results_ids) and not after_stop:
+                # the assessment has no Next / Previous (it moves on as questions are answered); results need no menu
+                for k_ in ("next", "back", "swipe_next", "swipe_back"):
+                    row[k_] = "N/A (assessment)"
+                if s.id in crawler.results_ids:
+                    row["menu"] = "N/A (not needed)"
                 row["notes"] = (row["notes"] + "; " if row["notes"] else "") + "Assessment screen: no Back/Next expected"
             vals = [row["next"], row["back"], row["menu"], row["clicks"], row["swipe_next"], row["swipe_back"]]
             row["result"] = ("Not tested" if after_stop else "Fail" if any(str(x).startswith("Fail") for x in vals)
