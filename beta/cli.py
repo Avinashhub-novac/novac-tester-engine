@@ -38,6 +38,11 @@ class _Quiet(SimpleHTTPRequestHandler):
         pass
 
 
+class _Server(ThreadingHTTPServer):
+    def handle_error(self, request, client_address):
+        pass   # the browser often stops a video download early (a "broken pipe"): not an error
+
+
 def cmd_run(a):
     work = Path(a.work).resolve()
     port = _free_port()
@@ -61,7 +66,7 @@ def cmd_run(a):
             "created": time.time(), "status": "queued", "glossary": a.glossary or "",
             "options": json.loads(a.options or "{}")}
     (run_dir / "run.json").write_text(json.dumps(meta, indent=1))
-    srv = ThreadingHTTPServer(("127.0.0.1", port), functools.partial(_Quiet, directory=str(work)))
+    srv = _Server(("127.0.0.1", port), functools.partial(_Quiet, directory=str(work)))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         runner.execute(run_dir)

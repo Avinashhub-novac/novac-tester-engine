@@ -1455,6 +1455,20 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 self.click_box(page, back["box"])
             st2 = self.settle(page)
             new = self.identify(st2, expected=a if self._moved(before, self._sig(st2)) else None)
+            if new == b:
+                # check twice before reporting: a slow screen may still be changing, or the first click was too early
+                page.wait_for_timeout(1500)
+                new = self.identify(self.state(page))
+                if new == b:
+                    before = self._sig(self.state(page))
+                    if box and not lab:
+                        self.click_first(page, SEL["prev"])
+                    elif box:
+                        self.click_box(page, box)
+                    else:
+                        self.click_first(page, SEL["prev"])
+                    st2 = self.settle(page)
+                    new = self.identify(st2, expected=a if self._moved(before, self._sig(st2)) else None)
             self.log(f"Back: {self.label(b)} -> {self.label(new)}")
             name = f"“{lab}”" if lab else "Prev button"
             if new == b:
@@ -1908,6 +1922,15 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 if not changed:   # pictures and animations do not always show in the page structure: compare the screen
                     page.wait_for_timeout(800)
                     changed = self._pixels_changed(oshot, page)
+                if not changed:   # check twice before reporting: wait for the screen to settle and click once more
+                    page.wait_for_timeout(1500)
+                    base, noise = self.fp_baseline(page)
+                    try:
+                        page.mouse.click(o["x"], o["y"])
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(1200)
+                    changed = self.fp_changed(page, base, noise) or len(ctx.pages) != n_pages or self._pixels_changed(oshot, page)
                 box = [o["x"] - o["w"] / 2, o["y"] - o["h"] / 2, o["w"], o["h"]]
                 if changed and lab.startswith("item ") and len(ctx.pages) == n_pages:
                     title = self._popup_title(page, words0)
@@ -2421,7 +2444,8 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
     # ------------------------------------------------------------ main
     def run(self, passes=("desktop", "prev", "menu", "buttons", "mobile")):
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(args=["--autoplay-policy=no-user-gesture-required", "--no-sandbox"])
+            browser = pw.chromium.launch(channel="chromium",   # the full Chromium build, closest to the Chrome learners use
+                                         args=["--autoplay-policy=no-user-gesture-required", "--no-sandbox"])
             try:
                 for name in passes:
                     if self.blocked:

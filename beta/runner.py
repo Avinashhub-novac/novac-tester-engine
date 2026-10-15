@@ -120,6 +120,8 @@ class Run:
                     raise ValueError(f"Unsafe path in zip: {m.filename}")
             z.extractall(content)
         course = load_course(content)
+        # course videos in MP4 (H.264 / AAC) do not play in the open-source test browser: play a converted copy
+        self.media_prepared = media.make_playable(course.root, self.log)
         for w in course.warnings:
             self.col.add("navigation", "warning", w)
         self.log(f"Course model: {len(course.slides)} slides" + (f" – {course.title}" if course.title else ""))
@@ -315,6 +317,7 @@ class Run:
         self.finish(slides, {"course_title": course.title, "slide_count": len(course.slides),
                              "completion": crawler.completion, "shot_boxes": shot_boxes,
                              "restrictions": crawler.restrictions, "stage": opts.get("stage", "beta"),
+                             "media_prepared": self.media_prepared,
                              **tables})
 
     def test_tables(self, course, visits, crawler, passes):

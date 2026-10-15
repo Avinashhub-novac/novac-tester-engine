@@ -242,3 +242,59 @@ def caption_frame(video, t, text, out, width=1366):
     im.save(out, "PNG")
     tmp.unlink(missing_ok=True)
     return {"nodes": [{"t": text, "b": [(W - widest) / 2, top, widest, block_h]}], "words": words}
+
+
+# ---------------------------------------------------------------- course videos the test browser can play
+# The test browser is open-source Chromium: it plays MP3, WebM, VP9, AV1, Opus and Vorbis, but not H.264 video
+# or AAC audio (the usual Storyline MP4 / M4A). Before a course is tested, every such file in the unpacked copy is
+# re-encoded in place (same name, same length) so the screen plays as it does for a learner. The upload itself is
+# never changed. Fixed settings, so the same file always gives the same result.
+PLAYABLE_VIDEO = {"vp8", "vp9", "av1", "theora"}
+PLAYABLE_AUDIO = {"mp3", "opus", "vorbis", "flac", "pcm_s16le", "pcm_s24le", "pcm_f32le", "pcm_u8"}
+MEDIA_EXT = (".mp4", ".m4v", ".mov", ".m4a", ".aac", ".webm", ".ogv")
+
+
+def _codecs(path):
+    info = probe(path) or {}
+    v = [s.get("codec_name") for s in info.get("streams", []) if s.get("codec_type") == "video"
+         and not (s.get("disposition") or {}).get("attached_pic")]
+    a = [s.get("codec_name") for s in info.get("streams", []) if s.get("codec_type") == "audio"]
+    return v, a
+
+
+def make_playable(root: Path, log=print):
+    """Re-encodes course media the test browser cannot play. Returns [{file, from, seconds}] for the report."""
+    import time
+    done = []
+    files = sorted(p for p in Path(root).rglob("*") if p.is_file() and p.suffix.lower() in MEDIA_EXT)
+    todo = []
+    for p in files:
+        v, a = _codecs(p)
+        if (v and any(c not in PLAYABLE_VIDEO for c in v)) or (a and any(c not in PLAYABLE_AUDIO for c in a)):
+            todo.append((p, v, a))
+    if todo:
+        log(f"Preparing {len(todo)} video/audio file{'s' if len(todo) != 1 else ''} so the test browser can play them")
+    for p, v, a in todo:
+        t0 = time.time()
+        tmp = p.with_name(p.stem + ".__play__" + p.suffix)
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(p), "-map", "0:v?", "-map", "0:a?", "-threads", "4"]
+        if v:
+            cmd += ["-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-row-mt", "1", "-b:v", "0", "-crf", "34",
+                    "-pix_fmt", "yuv420p"]
+        if a:
+            cmd += ["-c:a", "libopus", "-b:a", "96k", "-ar", "48000"]
+        cmd += ["-movflags", "+faststart", "-f", "mp4", str(tmp)]
+        try:
+            code, _, err = run(cmd, 1800)
+            if code == 0 and tmp.exists() and tmp.stat().st_size > 0:
+                tmp.replace(p)
+                done.append({"file": p.relative_to(root).as_posix(), "from": "/".join(v + a),
+                             "seconds": round(time.time() - t0, 1)})
+            else:
+                log(f"Could not prepare {p.name} for playback")
+        except Exception as e:
+            log(f"Could not prepare {p.name} for playback: {e!r}"[:200])
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+    return done
