@@ -137,8 +137,9 @@ class QuizMixin:
         page.wait_for_timeout(1500)
         after = self._screen_text(page)
         new = " ".join(w for w in after.split() if w not in set(before.split()))
-        shot = ""
-        txt = new or after
+        if not new.strip():   # nothing new on screen: Submit did nothing (the question's own words, e.g.
+            return "No feedback", ""   # "Select the correct option", are not feedback)
+        txt = new
         if MUST_ANSWER_RE.search(txt):
             return "Answer required", txt[:200]
         if INCORRECT_RE.search(txt):
@@ -326,13 +327,17 @@ class QuizMixin:
             fb, _ = self.submit_answer(page)
             here = self.identify(self.settle(page, 400))
             shot = self.shot(page, f"{sid}_blank")
-            ok = fb == "Answer required" or (here == sid and fb in ("No feedback", "No Submit button"))
+            # the blank answer was refused when the learner is asked to choose, or simply stays on the question
+            # with no right / wrong feedback (Submit stays greyed out until an option is chosen)
+            ok = fb == "Answer required" or (here == sid and fb not in ("Correct", "Incorrect"))
             A["scenarios"].append({"name": "Submit without choosing an answer",
                                    "steps": f"Open {q.label}, press Submit without selecting any option.",
                                    "expected": "The learner is asked to choose an answer and stays on the question.",
                                    "actual": {"Answer required": "A message asks to choose an answer.",
                                               "No Submit button": "Submit is not available until an option is chosen."}.get(
-                                       fb, "Stayed on the question." if here == sid else f"Moved on to {self.label(here)}."),
+                                       fb, ("Stayed on the question; Submit does nothing until an option is chosen." if fb == "No feedback"
+                                            else f"Stayed on the question but showed “{fb}” feedback.") if here == sid
+                                       else f"Moved on to {self.label(here)}."),
                                    "result": "Pass" if ok else "Fail", "shot": shot})
             if not ok:
                 self.col.add("assessment", "error", "The question can be submitted without choosing an answer", slide_id=sid,
@@ -474,6 +479,9 @@ class QuizMixin:
                 tries += 1
                 r2 = play("wrong", tries - 1, retry_box=r["retry"])
                 landed_ok = self.is_first_question(r2.get("start_sid"), quiz)
+                if not landed_ok and self._retake_course(r, r2, tries, quiz):
+                    tries -= 1   # the attempts are used up: by design the button now starts the whole course again
+                    break
                 A["scenarios"].append({"name": f"Retry – attempt {tries}", "steps": "On the results screen press Retry.",
                                        "expected": "The assessment starts again with no answers selected.",
                                        "actual": f"Opened {self.label(r2.get('start_sid'))}" + ("" if r2.get("cleared", True) else ", previous answers still selected") + ".",
@@ -600,12 +608,14 @@ class QuizMixin:
             here = self.identify(self.settle(page, 400))
             shot = self.shot(page, f"{q0.id}_blank")
             # stays on the question with no feedback, or Submit is not offered until an option is chosen
-            ok = fb == "Answer required" or (here == q0.id and fb in ("No feedback", "No Submit button"))
+            ok = fb == "Answer required" or (here == q0.id and fb not in ("Correct", "Incorrect"))
             A["scenarios"].append({"name": "Submit without choosing an answer",
                                    "steps": f"Open {q0.label}, press Submit without selecting any option.",
                                    "expected": "The learner is asked to choose an answer and stays on the question.",
                                    "actual": {"Answer required": "A message asks to choose an answer."}.get(fb,
-                                             "Stayed on the question." if here == q0.id else f"Moved on to {self.label(here)}."),
+                                             ("Stayed on the question; Submit does nothing until an option is chosen." if fb in ("No feedback", "No Submit button")
+                                              else f"Stayed on the question but showed “{fb}” feedback.") if here == q0.id
+                                             else f"Moved on to {self.label(here)}."),
                                    "result": "Pass" if ok else "Fail", "shot": shot})
             if not ok:
                 self.col.add("assessment", "error", "The question can be submitted without choosing an answer", slide_id=q0.id,
@@ -643,6 +653,9 @@ class QuizMixin:
                     tries += 1
                     r2 = self._attempt(page, quiz, "wrong", keys, nopt, page_ready=True, retry_box=r["retry"])
                     landed_ok = self.is_first_question(r2.get("start_sid"), quiz)
+                    if not landed_ok and self._retake_course(r, r2, tries, quiz):
+                        tries -= 1
+                        break
                     A["scenarios"].append({"name": f"Retry – attempt {tries}",
                                            "steps": "On the results screen press Retry.",
                                            "expected": f"The assessment starts again at {quiz[0].label} with no answers selected.",
@@ -794,6 +807,23 @@ class QuizMixin:
         out["retry"] = rb
         return out
 
+    def _retake_course(self, r, r2, tries, quiz):
+        """After the last allowed attempt many courses offer RETAKE to start the whole course again (not the
+        assessment): that is by design. True (and the scenario is recorded as passed) when the button opened a
+        screen before the assessment and either the screen says so ("retake the course") or a retry already worked."""
+        ids = [s.id for s in self.course.slides]
+        start = r2.get("start_sid") or ""
+        if start not in ids or not quiz or ids.index(start) >= ids.index(quiz[0].id):
+            return False
+        says_course = re.search(r"\b(retake|restart|start)\b.{0,30}\b(course|module)\b", r.get("text", ""), re.I)
+        if not (says_course or tries > 2):
+            return False
+        self.assessment["scenarios"].append({
+            "name": "Retake after the last attempt", "steps": "Use up every attempt, then press Retake on the results screen.",
+            "expected": "The attempts are used up: the course starts again.",
+            "actual": f"Opened {self.label(start)} (the course starts again).", "result": "Pass", "shot": r2.get("start_shot", "")})
+        return True
+
     def _judge(self, A, r, name, want, pass_mark, quiz):
         """Compares one full attempt with what should happen."""
         results_ids = A["results_ids"]
@@ -802,6 +832,11 @@ class QuizMixin:
         text = r.get("text", "")
         lms = r.get("lms") or {}
         status = (lms.get("success") or lms.get("status") or "").lower()
+        # some courses skip the results screen on a pass and open the completion / thank-you screen with the pass message
+        ids = [s.id for s in self.course.slides]
+        after_quiz = end in ids and quiz and quiz[-1].id in ids and ids.index(end) > ids.index(quiz[-1].id)
+        if not reached and after_quiz and want == "pass" and (PASS_RE.search(text) or status in ("passed", "completed")):
+            reached = True
         nums = [int(x) for x in re.findall(r"(\d{1,3})\s*%", text)]
         problems = []
         if not reached:
@@ -824,7 +859,8 @@ class QuizMixin:
                     problems.append(f"LMS score is {lms['score']} of {lms['score_max']}, expected full marks")
         expected = ("Results screen says the learner passed (100%)" if want == "pass" else "Results screen says the learner failed (0%)") + \
                    (f"; pass mark {pass_mark}%" if pass_mark is not None else "") + "; result sent to the LMS"
-        actual = (f"Results screen: “{' '.join(text.split()[:30])}”" if reached else "Results screen not reached") + \
+        actual = ((f"Results screen: “{' '.join(text.split()[:30])}”" if end in results_ids or not results_ids
+                   else f"{self.label(end)}: “{' '.join(text.split()[:30])}”") if reached else "Results screen not reached") + \
                  (f"; LMS: status {status or 'not sent'}, score {lms.get('score') or '—'}" + (f"/{lms['score_max']}" if lms.get("score_max") else "") if lms else "")
         A["scenarios"].append({"name": name, "steps": ("Answer every question correctly" if want == "pass" else "Answer every question wrongly") +
                                f" ({len(r['answers'])} answers given), then open the results screen.",

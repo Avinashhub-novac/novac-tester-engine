@@ -133,7 +133,12 @@ def cmd_merge(a):
                     slide_id=it.get("slide_id", ""), slide_label=it.get("label", ""), screenshot=it.get("shot", ""),
                     locate=" ".join((it.get("script") or "").split()[:6]), detail=d,
                     fix="Make the captions match the transcript (VO script).")
+    vo_only = (tasks.get("sb_compare") or {}).get("mode") == "vo_only"
     for v in ans.get("sb_compare", []):
+        if vo_only:   # Beta: only VO (SB) vs captions / transcript; never issues in the SB itself
+            if str(v.get("error_in") or "").lower() == "sb":
+                continue
+            v = {**v, "found_in": "Transcript"}
         sid = v.get("slide_id") or ""
         sl = next((x for x in tasks.get("sb_compare", {}).get("slides", []) if x["id"] == sid), {})
         details = [v["explanation"]] if v.get("explanation") else []

@@ -1281,12 +1281,17 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 return b
         return None
 
+    NOT_NAV = re.compile(r"^\W*(retake|retry|restart|start again|try again|exit|home|menu|replay|review|"
+                         r"retake (course|assessment|quiz)|restart (course|module))\b", re.I)
+
     def slide_nav(self, page, slide, direction="forward"):
         """The slide's own navigation button, for players without Next/Prev: {box, label, target} or None."""
         ids = self.course.ids()
         here = ids.index(slide.id) if slide and slide.id in ids else -1
         cands = []
         for o in (slide.nav_objects if slide else []):
+            if self.NOT_NAV.match(o.get("label") or ""):
+                continue   # Retake / Restart / Exit / Home / Menu jump elsewhere by design: they are not Back or Next
             t = o["target"]
             fwd = t == "NEXT" or (t in ids and ids.index(t) > here)
             back = t == "PREV" or (t in ids and 0 <= ids.index(t) < here)
@@ -1421,19 +1426,43 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 got = self.identify(self.settle(page, 300))
                 if got != sid and not got.startswith("unknown"):
                     return got   # that item was itself a way forward
-                # a pop-up opened: let its narration finish (many courses mark an item "visited" only then)
-                t_pop = time.time()
-                while time.time() - t_pop < 90:
-                    self.check_time()
-                    if not any(not m["paused"] for m in self.state(page)["media"]):
-                        break
-                    page.wait_for_timeout(1000)
+                # a pop-up opened: let its timeline play to the end (the item counts as visited only then)
+                self._play_popup(page)
             self._close_any(page, slide)   # close the pop-up layer the item opened, if any
         self.seek_to_end(page)
         page.wait_for_timeout(600)
         if retry is None:
             return sid
         return retry()
+
+    @staticmethod
+    def _seek_frac(st):
+        if st.get("seekMax") and st.get("seekVal") is not None and st["seekMax"] > 0:
+            return st["seekVal"] / st["seekMax"]
+        return st.get("seekFill")
+
+    def _play_popup(self, page, limit=180):
+        """Standard for every clickable: after it opens a pop-up / layer, wait until the seekbar inside it reaches
+        the end (and its narration stops) before closing it – many courses enable Next only then.
+        Stops early when the timeline stands still (it waits for a click) or there is nothing playing."""
+        t0, last, still = time.time(), None, 0
+        page.wait_for_timeout(800)
+        while time.time() - t0 < limit:
+            self.check_time()
+            st = self.state(page)
+            f = self._seek_frac(st)
+            playing = any(not m["paused"] for m in st["media"])
+            if not playing and (f is None or f >= 0.985):
+                break
+            if f is not None and last is not None and abs(f - last) < 0.002 and not playing:
+                still += 1
+                if still >= 4:
+                    break
+            else:
+                still = 0
+            last = f
+            page.wait_for_timeout(1000)
+        page.wait_for_timeout(500)
 
     def _close_any(self, page, slide):
         """Closes a pop-up layer: its Close / × button (by name, drawn as a shape, or as the course data says)."""
@@ -1478,9 +1507,10 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
         return True
 
     def no_nav_expected(self, slide):
-        """Screens without their own Back / Next: the welcome screen and the assessment (questions and result)."""
+        """Screens without their own Back / Next: the welcome and thank-you screens and the assessment (questions and result)."""
         graded = any(x.get("type") not in (None, "view") for x in (self.course.scorings or []))
-        return bool(slide) and (is_welcome(slide) or (graded and slide.id in self.quiz_ids) or slide.id in self.results_ids)
+        return bool(slide) and (is_welcome(slide) or is_end(slide, len(self.course.slides))
+                                or (graded and slide.id in self.quiz_ids) or slide.id in self.results_ids)
 
     def _wait_full(self, page, slide):
         """Before calling a screen a dead end: play it again from the start in real time, without skipping ahead,
@@ -2162,6 +2192,8 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 items.append(item)
                 btn_seen.setdefault(rkey, (sid, item))
                 if changed and len(ctx.pages) == n_pages and self.identify(self.state(page)) == sid:
+                    # let what the click opened play to its end (seekbar complete) before judging Next or closing it
+                    self._play_popup(page)
                     # what the click revealed (a layer, a tab): keep it, so text shown only there can be pictured
                     try:
                         lay = self.shot(page, f"{sid}_layer{k}")

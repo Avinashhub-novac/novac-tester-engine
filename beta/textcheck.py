@@ -26,11 +26,16 @@ def _same_title(a, b):
     return n(a) == n(b)
 
 
-def check_screen_numbers(seq, col, assess=(), results=(), welcome=(), partial=False):
+KC_RE = re.compile(r"knowledge\s*check|check\s+your\s+(knowledge|understanding)|quick\s+check|let'?s\s+check|"
+                   r"test\s+your\s+(knowledge|understanding)|self[-\s]?check|try\s+it", re.I)
+
+
+def check_screen_numbers(seq, col, assess=(), results=(), welcome=(), partial=False, knowledge=()):
     """seq: [(slide_id, label, text, title)] in learner order.
     Team rules: screens may repeat a number when they carry the same title (one screen built as several slides);
     the assessment's rules, questions and results share one number, and the results screen may have none;
-    the welcome screen has none. Numbers must run in order without gaps."""
+    the welcome screen has none; a knowledge check may carry the number of the screen before it.
+    Numbers must run in order without gaps."""
     seq = [x if len(x) == 4 else (*x, "") for x in seq]
     found = [(sid, lab, find_screen_number(t), title) for sid, lab, t, title in seq]
     numbered = [f for f in found if f[2]]
@@ -39,6 +44,7 @@ def check_screen_numbers(seq, col, assess=(), results=(), welcome=(), partial=Fa
         return
     col.ran("screen_number")
     assess, results, welcome = set(assess), set(results), set(welcome)
+    kc = set(knowledge) | {sid for sid, lab, t, title in seq if KC_RE.search(title or "") or KC_RE.search((t or "")[:400])}
     totals = {}
     for _, _, n, _ in numbered:
         totals[n[1]] = totals.get(n[1], 0) + 1
@@ -68,7 +74,8 @@ def check_screen_numbers(seq, col, assess=(), results=(), welcome=(), partial=Fa
         if a in first_with:
             osid, olab, otitle = first_with[a]
             both_assess = sid in assess and osid in assess
-            if not both_assess and not _same_title(title, otitle):
+            kc_repeat = a == prev and (sid in kc or prev_sid in kc)   # a knowledge check keeps the screen's number
+            if not both_assess and not kc_repeat and not _same_title(title, otitle):
                 col.add("screen_number", "error", f"Screen number {a} is used for screens with different titles", slide_id=sid,
                         slide_label=lab, detail=f"Also on {olab}",
                         fix="Give each screen with a different title its own number, in order.")

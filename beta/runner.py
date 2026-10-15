@@ -283,9 +283,10 @@ class Run:
             tr_shot = v.get("transcript_shot", "") if v.get("transcript_text") else ""
             if tr_shot:
                 shot_boxes[tr_shot] = v.get("transcript_boxes") or {}
+            # captions, transcript and CC are one and the same text: proofread it once
+            vo = tr_text if (tr_text and tr_text.strip()) else " ".join(caps)
             parts = [("slide title", s.title, {}), ("on-screen text", "\n".join(s.texts), {}),
-                     ("transcript", tr_text, {"shot": tr_shot}),
-                     ("captions", " ".join(caps), {"cap_shots": cap_shots})]
+                     ("captions", vo, {"cap_shots": cap_shots, "shot": tr_shot})]
             for src, txt, extra in parts:
                 if txt and txt.strip():
                     items.append({"id": f"{s.id}|{src}", "slide_id": s.id, "slide": s.label, "source": src,
@@ -329,7 +330,9 @@ class Run:
         n_all = len(course.slides)
         textcheck.check_screen_numbers(seq, self.col, assess=crawler.assess_ids, results=crawler.results_ids,
                                        welcome={s.id for s in course.slides if is_welcome(s) or is_end(s, n_all)},
-                                       partial=bool(crawler.blocked))
+                                       partial=bool(crawler.blocked),
+                                       knowledge={s.id for s in course.slides if s.id not in crawler.assess_ids
+                                                  and (getattr(s, "is_quiz", False) or getattr(s, "choices", None))})
 
         slides = self.slide_list(course, visits, crawler)
         self.finish(slides, {"course_title": course.title, "slide_count": len(course.slides),
@@ -514,14 +517,11 @@ class Run:
         for s in course.slides:
             v = visits.get(s.id, {})
             caps = s.captions or v.get("captions", [])
-            if (s.audio or s.video) and not caps:
+            # captions = transcript = CC: the narration's words in any of them count
+            if (s.audio or s.video) and not caps and not (v.get("transcript_text") or s.notes or "").strip():
                 self.col.add("transcript", "warning", "Slide has narration but no closed captions were found",
                              slide_id=s.id, slide_label=s.label, screenshot=v.get("shot", ""))
-            script = v.get("transcript_text") or s.notes
-            if caps and script and len(script.split()) >= 5:
-                self.tasks["script_compare"].append({"id": s.id, "slide_id": s.id, "label": s.label,
-                                                     "captions": " ".join(caps), "script": script,
-                                                     "shot": v.get("transcript_shot") or v.get("shot", "")})
+            # captions, transcript and CC are one and the same: they are never compared with each other
 
     @staticmethod
     def label_of(course, sid):
@@ -556,7 +556,16 @@ class Run:
         except Exception as e:
             self.log(f"Storyboard pages could not be pictured: {e}"[:200])
         self.col.ran("content")
-        self.tasks["sb_compare"] = {"storyboard_text_file": str(out), "storyboard_chars": len(text), "slides": slides}
+        task = {"storyboard_text_file": str(out), "storyboard_chars": len(text), "slides": slides}
+        if self.meta.get("options", {}).get("stage", "beta") == "beta":
+            # Beta: only the SB's VO section is compared with the course's captions (= transcript = CC);
+            # nothing else in the SB is checked and mistakes in the SB itself are not reported
+            task["mode"] = "vo_only"
+            task["slides"] = [{"id": x["id"], "label": x["label"], "title": x.get("title", ""), "time": x.get("time", ""),
+                               "vo": (x.get("transcript") or x.get("captions") or "").strip(),
+                               "reached": x.get("reached", True), "shot": x.get("shot", ""), "cap_shots": x.get("cap_shots", [])}
+                              for x in slides]
+        self.tasks["sb_compare"] = task
 
     def report_transcripts(self, pending, slide_based):
         if not pending:
@@ -816,6 +825,8 @@ def text_shot(item, original):
     for c in item.get("cap_shots") or []:
         if want and want in " ".join(c["text"].lower().split()):
             return c["shot"]
+    if item.get("shot"):   # the transcript panel holds the same words
+        return item["shot"]
     if item.get("cap_shots"):
         return item["cap_shots"][0]["shot"]
     return item.get("shot", "")
@@ -827,7 +838,7 @@ def issue_to_finding(iss, item):
     src = item.get("source", "text")
     in_transcript = src in ("captions", "transcript", "notes")
     check = "transcript" if in_transcript else ("spelling" if cat == "spelling" else "grammar")
-    where = {"captions": "closed captions", "transcript": "transcript"}.get(src, src)
+    where = {"captions": "captions / transcript", "transcript": "captions / transcript"}.get(src, src)
     return {"check": check,
             "severity": iss.get("severity") if iss.get("severity") in ("error", "warning") else "warning",
             "message": f"{cat.capitalize()} in {where}: “{iss.get('original', '')}”",
