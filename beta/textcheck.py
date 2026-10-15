@@ -46,6 +46,14 @@ def check_screen_numbers(seq, col, assess=(), results=(), welcome=(), partial=Fa
     first_with = {}           # number -> (sid, label, title) of the first screen that showed it
     prev = prev_sid = None
     started = False
+    # the results screen carries the assessment's number (or none): check it on its own and leave it out of the count
+    assess_nums = [n for s_, _, n, _ in found if n and s_ in assess and s_ not in results]
+    for sid, lab, n, title in [x for x in found if x[0] in results and x[2]]:
+        if assess_nums and n[0] != assess_nums[0][0]:
+            col.add("screen_number", "error", f"Results screen number '{n[2]}' is different from the assessment's '{assess_nums[0][2]}'",
+                    slide_id=sid, slide_label=lab, suggestion=assess_nums[0][2],
+                    fix=f"Use the assessment's screen number ({assess_nums[0][2]}) on the results screen, or no number.")
+    found = [x for x in found if x[0] not in results]
     for sid, lab, n, title in found:
         if not n:
             if started and sid not in results and sid not in welcome and sid not in assess:

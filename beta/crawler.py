@@ -570,6 +570,10 @@ class Crawler(QuizMixin):
                     box = loc.first.bounding_box()
                     if box:
                         page.mouse.click(box["x"] + box["width"] * 0.995, box["y"] + box["height"] / 2)
+                        # move off the seekbar: its time tooltip ("0:28 / 0:29") would otherwise sit over the
+                        # screen's own PREV / NEXT buttons and take the next click
+                        page.mouse.move(2, 2)
+                        page.wait_for_timeout(350)
                         return True
             except Exception:
                 continue
@@ -1200,6 +1204,8 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
     BACK_WORDS = re.compile(r"^(back|previous|prev|go back|[‹«<←◀◄])$", re.I)
 
     def click_box(self, page, box):
+        page.mouse.move(2, 2)            # leave any hover pop-up (e.g. the seekbar time tooltip) first
+        page.wait_for_timeout(150)
         page.mouse.click(box[0] + box[2] / 2, box[1] + box[3] / 2)
 
     def _box_of(self, page, model_id):
@@ -1415,6 +1421,13 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 got = self.identify(self.settle(page, 300))
                 if got != sid and not got.startswith("unknown"):
                     return got   # that item was itself a way forward
+                # a pop-up opened: let its narration finish (many courses mark an item "visited" only then)
+                t_pop = time.time()
+                while time.time() - t_pop < 90:
+                    self.check_time()
+                    if not any(not m["paused"] for m in self.state(page)["media"]):
+                        break
+                    page.wait_for_timeout(1000)
             self._close_any(page, slide)   # close the pop-up layer the item opened, if any
         self.seek_to_end(page)
         page.wait_for_timeout(600)
@@ -1812,7 +1825,11 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
         home = self.identify(self.state(page))
         if self.can_jump(page):
             # test the menu from the last screen that has it, where every earlier topic should be open
-            with_menu = [x.id for x in self.course.slides if self._menu_links(x)]
+            n_all = len(self.course.slides)
+            # a content screen: on the assessment, its results and the end screen the menu is often switched off on purpose
+            with_menu = [x.id for x in self.course.slides if self._menu_links(x) and x.id not in self.assess_ids
+                         and not is_end(x, n_all) and not is_welcome(x)] or \
+                        [x.id for x in self.course.slides if self._menu_links(x)]
             if with_menu:
                 home = with_menu[-1]
             self.jump(page, home)
@@ -2161,6 +2178,14 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                                      screenshot=self.shot(page, f"{sid}_noclose{k}"), vw=1366, found_in="Buttons",
                                      fix="Make the Close button close the pop-up and show the screen again.")
                 if not changed:
+                    try:   # the item may have moved since the list was made (it was still animating in): mark where it is now
+                        now = [c for c in page.evaluate(CLICKABLES_JS, SEL) if o.get("label") and c.get("label") == o["label"]]
+                        if now:
+                            c = min(now, key=lambda c: abs(c["y"] - o["y"]) + abs(c["x"] - o["x"]))
+                            box = [c["x"] - c["w"] / 2, c["y"] - c["h"] / 2, c["w"], c["h"]]
+                            oshot = self.shot(page, f"{sid}_btn{k}_now")
+                    except Exception:
+                        pass
                     self.col.add("buttons", "warning", "Clickable object does nothing when clicked", slide_id=sid,
                                  slide_label=self.label(sid), detail=lab,
                                  screenshot=oshot, box=box, vw=1366)
@@ -2629,6 +2654,12 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                     page.reload(wait_until="load", timeout=90000)
                     self._ready(page)
 
+        # start again from a clean session: the menu test may have left the menu open or a screen visited
+        if "menu" in exp:
+            try:
+                self.fresh(page)
+            except Exception:
+                pass
         # Next and seekbar: walk the first slides; test each on arrival, while the slide is still playing
         next_seen, seek_seen = [], []
         for k_r in range(min(8, len(ids))):
@@ -2640,16 +2671,27 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             if dur >= 3:
                 page.wait_for_timeout(600)
                 st = self.state(page)
+                moved_on = None
                 if "next" in exp and sid != ids[0]:  # the title slide's START is meant to be available at once
                     if st["nextExists"]:
                         usable, box, lab = not st["nextDisabled"], st.get("nextBox"), "Next"
+                        shot_n = self.shot(page, f"{sid}_restrict_next")
                     else:
+                        # the screen's own NEXT can be on screen and still locked: press it and see if it moves
                         nav = self.slide_nav(page, slide, "forward")
-                        usable, box, lab = nav is not None, (nav or {}).get("box"), (nav or {}).get("label", "")
+                        box, lab = (nav or {}).get("box"), (nav or {}).get("label", "")
+                        shot_n = self.shot(page, f"{sid}_restrict_next")
+                        usable = False
+                        if nav and not re.match(r"^\W*(start|begin|let'?s (go|begin|start)|get started)\b", lab or "", re.I):
+                            b0 = self._sig(self.state(page))
+                            self.click_box(page, box)
+                            s2 = self.settle(page)
+                            got = self.identify(s2)
+                            if self._moved(b0, self._sig(s2)) and got != sid and not got.startswith("unknown"):
+                                usable, moved_on = True, got
                     if not re.match(r"^\W*(start|begin|let'?s (go|begin|start)|get started)\b", lab or "", re.I):
-                        next_seen.append({"sid": sid, "usable": usable, "box": box,
-                                          "shot": self.shot(page, f"{sid}_restrict_next")})
-                if "seekbar" in exp and st["seekVisible"] and st.get("seekBox"):
+                        next_seen.append({"sid": sid, "usable": usable, "box": box, "shot": shot_n})
+                if "seekbar" in exp and not moved_on and st["seekVisible"] and st.get("seekBox"):
                     def frac(x):
                         if x.get("seekMax") and x.get("seekVal") is not None and x["seekMax"] > 0:
                             return x["seekVal"] / x["seekMax"]
@@ -2662,6 +2704,8 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                     after = frac(self.state(page))
                     if before is not None and after is not None:
                         seek_seen.append({"sid": sid, "jumped": after - before > 0.3, "box": b, "shot": shot})
+                if moved_on:
+                    continue   # pressing NEXT already opened the next screen
             if not self.advance(page, sid):
                 break
         if "next" in exp:

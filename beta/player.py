@@ -204,6 +204,35 @@ MENU_JS = r"""
 TEXTBOX_JS = r"""
 () => {
   const out = [], words = [];
+  // text under a pop-up or a "Do you want to exit?" box is not seen by the learner: leave it out
+  const solid = el => {
+    const s = getComputedStyle(el);
+    if (['IMG', 'CANVAS', 'VIDEO'].includes(el.tagName)) return true;
+    const m = (s.backgroundColor || '').match(/rgba?\(([^)]+)\)/);
+    if (m) { const v = m[1].split(',').map(Number); if (v.length < 4 || v[3] > 0.5) return true; }
+    if (el instanceof SVGElement && !['text', 'tspan', 'svg', 'g'].includes(el.tagName.toLowerCase())) {
+      const f = s.fill || ''; if (f && f !== 'none' && !/rgba\([^)]*,\s*0\)/.test(f) && parseFloat(s.fillOpacity || '1') > 0.5) return true;
+    }
+    return false;
+  };
+  const hiddenUnder = (target, r) => {
+    if (!target) return false;
+    const x = r.x + r.width / 2, y = r.y + r.height / 2;
+    if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) return false;
+    const stack = document.elementsFromPoint(x, y);
+    const at = stack.findIndex(e => e === target || target.contains(e) || e.contains(target));
+    if (at < 0) return true;   // nothing of it is at that spot: something else is drawn there
+    for (let k = 0; k < at; k++) {
+      const e = stack[k];
+      if (e.closest('.acc-shadow-dom, .acc-shadow-el, [class*="acc-shadow"]')) continue;
+      if (solid(e)) return true;
+    }
+    return false;
+  };
+  const visualOf = el => {
+    const id = (el.getAttribute('data-represents') || '').split('.').pop() || (el.id || '').replace(/^acc-/, '');
+    return id ? document.querySelector('.slide-object[data-model-id="' + id + '"]') : null;
+  };
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   const range = document.createRange();
   let node;
@@ -218,6 +247,7 @@ TEXTBOX_JS = r"""
     range.selectNodeContents(node);
     const r = range.getBoundingClientRect();
     if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.right < 0 || r.top > innerHeight || r.left > innerWidth) continue;
+    if (hiddenUnder(el.closest('.slide-object') || el, r)) continue;
     const n = out.length;
     out.push({ t: raw.replace(/\s+/g, ' ').trim().slice(0, 600), b: [r.x, r.y, r.width, r.height] });
     const re = /\S+/g; let m;
@@ -245,6 +275,7 @@ TEXTBOX_JS = r"""
     const r = el.getBoundingClientRect();
     if (r.width < 4 || r.height < 4 || r.right < 0 || r.bottom < 0 || r.left > innerWidth || r.top > innerHeight) return;
     if (r.width > innerWidth * 0.98 && r.height > innerHeight * 0.9) return;   // the whole slide, not a text box
+    if (hiddenUnder(visualOf(el), r)) return;
     const k = t + '|' + Math.round(r.x) + ',' + Math.round(r.y);
     if (seenAcc.has(k)) return; seenAcc.add(k);
     out.push({ t: t.slice(0, 600), b: [r.x, r.y, r.width, r.height], acc: true });

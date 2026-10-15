@@ -121,6 +121,8 @@ def cmd_merge(a):
     from beta.runner import issue_to_finding
     for iss in ans.get("proofread", []):
         it = item("proofread", iss.get("item_id")) or {}
+        if "^" not in str(it.get("text", "")):   # formatting marks (^superscript^) belong to storyboards only
+            iss = {k: (v.replace("^", "") if isinstance(v, str) else v) for k, v in iss.items()}
         add(**issue_to_finding(iss, it))
     for v in ans.get("script_compare", []):
         it = item("script_compare", v.get("item_id")) or {}
@@ -629,10 +631,46 @@ def cmd_report(a):
     print(json.dumps({"xlsx": str(out), "report_name": out.name, "size": len(data), "parts": parts}, indent=1))
 
 
+def _read_upload_map(path, bundle_dir, needed):
+    """Which asset id each uploaded picture got. Accepts the upload tool's own result text, pasted as it is
+    (lines like  "…/f015.jpg" (143366 bytes, image/jpeg) → "/_blob/…" (id 9ff4…)), or a JSON map {"f015.jpg": id}.
+    The byte counts are checked against the files here, so a picture can never be attached to the wrong issue."""
+    txt = path.read_text(encoding="utf-8", errors="replace")
+    ids, sizes, problems = {}, {}, []
+    for m in re.finditer(r'"([^"\n]+?\.(?:jpe?g|png))"\s*\((\d+) bytes[^)]*\)\s*(?:→|->)\s*"[^"]*"\s*\(id ([0-9a-f]{16,64})\)', txt):
+        p, size, aid = m.groups()
+        name = Path(p).name
+        if name in ids and ids[name] != aid:
+            problems.append(f"{name} has two different asset ids")
+        ids[name], sizes[name] = aid, int(size)
+    if not ids:
+        try:
+            got = json.loads(txt)
+            ids = {str(k): str(v) for k, v in got.items()} if isinstance(got, dict) else {}
+        except Exception:
+            ids = {}
+    for name, size in sizes.items():
+        local = bundle_dir / name
+        if local.exists() and local.stat().st_size != size:
+            problems.append(f"{name}: uploaded {size} bytes but the file here has {local.stat().st_size} bytes")
+    seen = {}
+    for name, aid in ids.items():
+        if aid in seen and seen[aid] != name:
+            problems.append(f"{name} and {seen[aid]} point to the same asset id")
+        seen[aid] = name
+    missing = sorted(n for n in needed if n not in ids)
+    if missing:
+        problems.append("no asset id for " + ", ".join(missing[:10]) + (" …" if len(missing) > 10 else ""))
+    if problems:
+        raise SystemExit("Screenshot upload list does not match the pictures: " + "; ".join(problems[:8])
+                         + ". Upload the pictures again and pass the upload results exactly as the tool printed them.")
+    return ids
+
+
 def cmd_finalize(a):
     run_dir, res = _paths(a)
     names = json.loads((run_dir / "bundle" / "names.json").read_text())
-    ids = json.loads(Path(a.map).read_text())  # {"x.jpg": "<asset id>"}
+    ids = _read_upload_map(Path(a.map), run_dir / "bundle", set(names.values()))
 
     def conv(r):
         n = names.get(r)

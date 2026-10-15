@@ -142,7 +142,8 @@ class Run:
             passes.remove("restrict")
         if gold:   # Gold / Showstopper: functionality only (navigation and the assessment)
             passes = ["desktop", "prev", "assessment"]
-        if not any(s.is_quiz for s in course.slides):
+        from .quiz import assessment_parts as _ap
+        if not any(s.is_quiz for s in course.slides) and not _ap(course)[1]:
             passes = [p for p in passes if p != "assessment"]
         # time limit: twice the course's running time plus 10 minutes (at least 20), so a test never hangs
         play_min = sum(min(s.duration_ms, 600000) for s in course.slides) / 60000.0

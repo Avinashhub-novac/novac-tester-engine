@@ -603,6 +603,9 @@ def load_course(extract_dir: Path) -> Course:
                 course.quiz_refs.append(rid)
     order = {sid: i for i, sid in enumerate(course.ids())}
     course.quiz_refs = sorted(dict.fromkeys(course.quiz_refs), key=lambda x: order.get(x, 0))
+    for s in course.slides:   # a screen the graded quiz scores is a question, whatever its own data shows
+        if s.id in course.quiz_refs:
+            s.is_quiz = s.has_interaction = True
     seen, shared = set(), set()
     for s in course.slides:
         shared |= seen & s.object_ids
