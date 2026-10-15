@@ -35,6 +35,7 @@ class Slide:
     dead_click_objects: list = field(default_factory=list)  # [{id, label}] objects with click triggers but no actions
     nav_objects: list = field(default_factory=list)  # [{id, label, target}] slide buttons that jump to a slide
     click_objects: list = field(default_factory=list)  # [{id, label}] every object with a click trigger
+    close_objects: list = field(default_factory=list)  # ids of buttons that close a pop-up layer
     raw_ok: bool = True
     object_ids: set = field(default_factory=set)   # ids of every object on the slide (shown as data-model-id)
     scene_id: str = ""
@@ -302,6 +303,20 @@ def _click_objects(slide_json):
     return out
 
 
+def _close_objects(slide_json):
+    """Ids of buttons whose click hides a layer (the close buttons of pop-ups, often an unnamed X icon)."""
+    out = []
+    for _, d in _walk(slide_json):
+        evs = d.get("events")
+        if not isinstance(evs, list) or "id" not in d:
+            continue
+        for ev in evs:
+            if isinstance(ev, dict) and ev.get("kind") in CLICK_EVENTS and '"hide_slidelayer"' in json.dumps(ev.get("actions") or [], separators=(",", ":")):
+                out.append(str(d["id"]))
+                break
+    return out
+
+
 def _dead_clicks(slide_json):
     out = []
     for _, d in _walk(slide_json):
@@ -309,16 +324,22 @@ def _dead_clicks(slide_json):
         if not isinstance(evs, list) or "id" not in d:
             continue
         for ev in evs:
-            if isinstance(ev, dict) and ev.get("kind") in CLICK_EVENTS and not ev.get("actions"):
-                name = d.get("accText") or d.get("altText") or d.get("id")
+            # no action at all, or only the button's own hover-state reset: a click does nothing for the learner
+            acts = [a for a in (ev.get("actions") or []) if isinstance(a, dict)] if isinstance(ev, dict) else []
+            only_hover = acts and all(a.get("kind") == "exe_actiongroup" and "hoverstate" in str(a.get("id", "")).lower() for a in acts)
+            if isinstance(ev, dict) and ev.get("kind") in CLICK_EVENTS and (not ev.get("actions") or only_hover):
+                name = d.get("accText") or d.get("altText") or _label_of(d) or ""
                 out.append({"id": str(d["id"]), "label": str(name)})
     return out
 
 
 def _is_quiz(slide_json):
+    # a question screen evaluates an answer (Storyline's eval_interaction action) or carries a question type;
+    # a screen that only mentions words like "submit" or "quiz" in its text is not a question
     blob = json.dumps(slide_json, separators=(",", ":"))[:500000].lower()
-    return any(k in blob for k in ('"kind":"multiplechoice"', '"kind":"truefalse"', '"kind":"multipleresponse"',
-                                   '"quiz"', '"interaction"', '"kind":"freeform', '"submit'))
+    return any(k in blob for k in ('"kind":"eval_interaction"', '"kind":"multiplechoice"', '"kind":"truefalse"',
+                                   '"kind":"multipleresponse"', '"kind":"freeform', '"kind":"matching"',
+                                   '"kind":"sequence"', '"kind":"fillin"', '"kind":"hotspot"', '"kind":"wordbank"'))
 
 
 # ---------------------------------------------------------------- loader
@@ -414,6 +435,7 @@ def load_course(extract_dir: Path) -> Course:
         s.dead_click_objects = _dead_clicks(sj)
         s.nav_objects = _nav_objects(sj, known - {s.id})
         s.click_objects = _click_objects(sj)
+        s.close_objects = _close_objects(sj)
         s.object_ids = {str(d["id"]) for _, d in _walk(sj) if "id" in d and isinstance(d.get("id"), (str, int))} - {s.id}
     seen, shared = set(), set()
     for s in course.slides:

@@ -206,6 +206,29 @@ def _find_text_box(tb, needle):
     return min(hits, key=lambda b: b["b"][2] * b["b"][3])["b"] if hits else None
 
 
+def _line_boxes(tb, needle):
+    """The words of `needle` on the screen, one tight box per line of text (so a quote that wraps is marked on
+    each line instead of with one big box over both lines)."""
+    if isinstance(tb, list):
+        tb = {"nodes": tb, "words": []}
+    want = [_norm_word(w) for w in (needle or "").split() if _norm_word(w)]
+    words = (tb or {}).get("words", [])
+    for i in range(len(words) - len(want) + 1):
+        seq = words[i:i + len(want)]
+        if want and [_norm_word(x["w"]) for x in seq] == want:
+            lines = []
+            for x in seq:
+                b = x["b"]
+                if lines and abs((b[1] + b[3] / 2) - (lines[-1][1] + lines[-1][3] / 2)) < max(4, b[3] * 0.5):
+                    l = lines[-1]
+                    x0, y0 = min(l[0], b[0]), min(l[1], b[1])
+                    lines[-1] = [x0, y0, max(l[0] + l[2], b[0] + b[2]) - x0, max(l[1] + l[3], b[1] + b[3]) - y0]
+                else:
+                    lines.append(list(b))
+            return lines
+    return []
+
+
 def _locate(f, slide, shot_boxes=None, src_rel=""):
     """Best guess at where on the screenshot a finding is, in CSS pixels."""
     if f.get("box"):
@@ -408,7 +431,9 @@ def _group(findings, slides):
         if not f.get("slide_id") or f.get("check") == "content" or f.get("check", "").startswith("sb_"):
             final.append(f)
             continue
-        key = (f.get("check"), f.get("message"), f.get("mobile"), (f.get("detail") or "").split("\n")[0] if f.get("check") != "buttons" else "")
+        # the same wording matters for language issues; for navigation and the like the same message is the same problem
+        key = (f.get("check"), f.get("message"), f.get("mobile"),
+               (f.get("detail") or "").split("\n")[0] if f.get("check") in ("grammar", "spelling", "transcript", "logic") else "")
         across.setdefault(key, []).append(f)
     for key, group in across.items():
         need = 2 if key[0] in ("grammar", "spelling", "transcript") else 3   # the same mistake in the same words
@@ -485,6 +510,12 @@ def cmd_bundle(a):
     xl_dir = run_dir / "bundle_xl"
     shutil.rmtree(xl_dir, ignore_errors=True)
     xl_dir.mkdir()
+    # text is called "not visible" only when every screen was watched to its end (with "play every slide to the
+    # end" switched off, text that shows for a moment mid-screen may not have been pictured)
+    try:
+        watched = (json.loads((run_dir / "run.json").read_text()).get("options") or {}).get("play_full", True)
+    except Exception:
+        watched = True
     for i, f in enumerate(res["findings"]):
         sid = f.get("slide_id") or ""
         slide = slides.get(sid)
@@ -508,7 +539,7 @@ def cmd_bundle(a):
             if hit:
                 if hit != src_rel:
                     f["screenshot"] = src_rel = hit
-            elif f.get("check") in ("grammar", "spelling") and slide and slide.get("shot") and res.get("stage") != "sb":
+            elif f.get("check") in ("grammar", "spelling") and slide and slide.get("shot") and res.get("stage") != "sb" and watched:
                 # the words are only in the course files, never visible to a learner: not reported (team rule)
                 f["_hidden"] = True
                 continue
@@ -546,7 +577,14 @@ def cmd_bundle(a):
             if src_is_bundle and src_rel != (f.get("screenshot") or ""):
                 vw = 1366  # slide images are already saved at the desktop layout
             box = _locate(f, slide, shot_boxes, f.get("screenshot") or "")
-            _render(run_dir / src_rel, run_dir / name, box, vw, f.get("tag", ""), more=f.get("boxes"))
+            more = f.get("boxes")
+            nd = _needle(f)
+            if nd and not f.get("box"):
+                tb = shot_boxes.get(f.get("screenshot") or "") or ((slide or {}).get("boxes") or {})
+                lines = _line_boxes(tb, nd)
+                if len(lines) > 1:   # the quote wraps: mark it line by line
+                    box, more = lines[0], lines[1:]
+            _render(run_dir / src_rel, run_dir / name, box, vw, f.get("tag", ""), more=more)
             f["screenshot"], f["box"] = name, box
         if sb_img:
             f["sb_screenshot"] = sb_img
