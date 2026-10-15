@@ -199,7 +199,7 @@ class Run:
         if "buttons" not in passes:
             self.col.skip("buttons", "Buttons pass turned off for this run")
 
-        # ---- restrictions (Beta): compare what the course does with what the RCD says
+        # ---- restrictions (Beta): compare what the course does with what the SOW says
         names = {"menu": "Menu", "seekbar": "Seekbar", "next": "Next button"}
         where = {"menu": "Menu", "seekbar": "Seek Bar", "next": "Navigation"}
         if "restrict" in passes:
@@ -210,7 +210,7 @@ class Run:
                 if o["found"] != o["expected"]:
                     want = "restricted" if o["expected"] == "restricted" else "free (not restricted)"
                     self.col.add("restrictions", "error",
-                                 f"{names[k]} is {'not restricted' if o['found'] == 'free' else 'restricted'}, but it should be {want} as per RCD",
+                                 f"{names[k]} is {'not restricted' if o['found'] == 'free' else 'restricted'}, but it should be {want} as per SOW",
                                  slide_id=o.get("sid", ""), slide_label=self.label_of(course, o.get("sid", "")),
                                  detail=o.get("note", ""), screenshot=o.get("shot", ""), box=o.get("box"), vw=1366,
                                  found_in=where[k])

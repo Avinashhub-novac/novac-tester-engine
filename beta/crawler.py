@@ -2617,7 +2617,7 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                         + (f"it opened {self.label(got)}." if moved else "it did not open.")}
 
     def restrict_pass(self, browser):
-        """Beta: are menu, seekbar and Next restricted the way the RCD says?"""
+        """Beta: are menu, seekbar and Next restricted the way the SOW says?"""
         exp = {k: v for k, v in (self.expect or {}).items() if v in ("restricted", "free")}
         if not exp:
             return

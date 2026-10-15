@@ -340,7 +340,7 @@ def _completion_sheet(wb, res, run_dir):
     row = 4 + len(rows) + 1
     restr = res.get("restrictions") or {}
     if restr:
-        ws.cell(row, 1, "Restrictions (Beta, as per RCD)").font = Font(bold=True, size=12)
+        ws.cell(row, 1, "Restrictions (Beta, as per SOW)").font = Font(bold=True, size=12)
         row += 1
         hdr = ["Item", "Expected", "Found", "Result", "How it was checked"]
         ws.column_dimensions["C"].width = 14

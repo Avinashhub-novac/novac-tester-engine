@@ -12,7 +12,7 @@ CHECKS = [
     ("buttons", "Buttons"),
     ("screen_number", "Screen number"),
     ("seekbar", "Seekbar"),
-    ("restrictions", "Restrictions (RCD)"),
+    ("restrictions", "Restrictions (SOW)"),
     ("completion", "Completion"),
     ("content", "Content mapping (SB)"),
     ("video", "Video"),
