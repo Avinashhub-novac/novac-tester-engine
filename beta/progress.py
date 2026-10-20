@@ -8,6 +8,7 @@ Overall phases:  preparing → engine phases (browser passes / video checks) →
 text and the storyboard) → report (screenshots and Excel) → upload (to the site) → done.
 """
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -82,10 +83,18 @@ class Progress:
             except Exception:
                 pass
 
+    _lock = threading.Lock()   # the browser passes run side by side
+
     def save(self):
-        tmp = self.file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.state))
-        tmp.replace(self.file)
+        with self._lock:
+            tmp = self.file.with_suffix(f".{threading.get_ident()}.tmp")
+            tmp.write_text(json.dumps(self.state))
+            for _ in range(5):   # Windows: the file may be open in a reader for a moment
+                try:
+                    tmp.replace(self.file)
+                    break
+                except PermissionError:
+                    time.sleep(0.1)
 
     def set_plan(self, plan):
         self.state["plan"] = [[k, float(v)] for k, v in plan]

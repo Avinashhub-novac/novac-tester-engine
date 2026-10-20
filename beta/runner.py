@@ -2,6 +2,7 @@
 import json
 import re
 import shutil
+import threading
 import time
 import traceback
 import zipfile
@@ -31,17 +32,26 @@ class Run:
         self.prog = Progress(run_dir)
 
     # --------------------------------------------------- status/log
+    _meta_lock = threading.Lock()   # the browser passes run side by side and all write the log
+
     def log(self, msg):
         line = f"{time.strftime('%H:%M:%S')}  {msg}"
-        self.logf.write(line + "\n")
-        self.logf.flush()
-        self.meta["progress"] = msg
+        with self._meta_lock:
+            self.logf.write(line + "\n")
+            self.logf.flush()
+            self.meta["progress"] = msg
         self.save_meta()
 
     def save_meta(self):
-        tmp = self.dir / "run.json.tmp"
-        tmp.write_text(json.dumps(self.meta, indent=1))
-        tmp.replace(self.dir / "run.json")
+        with self._meta_lock:
+            tmp = self.dir / f"run.json.{threading.get_ident()}.tmp"
+            tmp.write_text(json.dumps(self.meta, indent=1))
+            for _ in range(5):   # Windows: the file may be open in a reader for a moment
+                try:
+                    tmp.replace(self.dir / "run.json")
+                    break
+                except PermissionError:
+                    time.sleep(0.1)
 
     def finish(self, slides, extra=None):
         f = [x.to_dict() for x in self.col.findings]
