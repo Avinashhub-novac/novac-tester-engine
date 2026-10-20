@@ -7,13 +7,14 @@ Every run must give the same result for the same input. That needs three things 
 A run never produces a report with a different engine or different tools: it stops and says why.
 """
 import hashlib
+import os
 import json
 import platform
 import re
 import subprocess
 from pathlib import Path
 
-RELEASE = "1.5.5"
+RELEASE = "1.5.6"
 MODEL = "claude-opus-5-5"
 
 # Exact versions the release was built and tested with.
@@ -39,6 +40,45 @@ def _run(cmd):
         return ""
 
 
+_BROWSER = None
+
+
+def _real_chrome():
+    """True when Google Chrome itself is installed (not a link to a Chromium build, as on the cloud tester)."""
+    places = ["/opt/google/chrome/chrome", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+    for env in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        if os.environ.get(env):
+            places.append(os.path.join(os.environ[env], "Google", "Chrome", "Application", "chrome.exe"))
+    for pth in places:
+        if os.path.exists(pth) and "chromium" not in os.path.realpath(pth).lower() and "pw-browsers" not in os.path.realpath(pth):
+            return True
+    return False
+
+
+def browser():
+    """The browser the checks run in: Google Chrome when it is installed on this machine (it plays MP4 / H.264
+    video and AAC audio like the learners' Chrome), otherwise the frozen Chromium build (the cloud tester).
+    EQC_BROWSER=chromium forces Chromium. Returns ("chrome" | "chromium", version)."""
+    global _BROWSER
+    if _BROWSER is None:
+        _BROWSER = ("chromium", FROZEN_TOOLS["chromium"])
+        if os.environ.get("EQC_BROWSER", "").lower() != "chromium" and _real_chrome():
+            try:
+                from playwright.sync_api import sync_playwright
+                with sync_playwright() as p:
+                    b = p.chromium.launch(channel="chrome")
+                    _BROWSER = ("chrome", b.version)
+                    b.close()
+            except Exception:
+                pass
+    return _BROWSER
+
+
+def launch(pw, **kw):
+    """Starts the chosen browser (see browser())."""
+    return pw.chromium.launch(channel=browser()[0], **kw)
+
+
 def tool_versions():
     from importlib.metadata import version
     v = {"python": ".".join(platform.python_version_tuple()[:2])}
@@ -47,12 +87,16 @@ def tool_versions():
             v[pkg] = version(pkg)
         except Exception:
             v[pkg] = "missing"
+    browser()   # decided before a Playwright session is open (sessions cannot be nested)
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
-            b = p.chromium.launch(channel="chromium")
-            v["chromium"] = b.version
-            b.close()
+            if browser()[0] == "chrome":
+                v["chrome"] = browser()[1]
+            else:
+                b = p.chromium.launch(channel="chromium")
+                v["chromium"] = b.version
+                b.close()
     except Exception as e:
         v["chromium"] = f"error: {e!r}"[:120]
     m = re.search(r"ffmpeg version (\d+\.\d+(?:\.\d+)?)", _run(["ffmpeg", "-version"]))
@@ -74,6 +118,8 @@ def check(engine_dir: Path, manifest: dict | None = None):
     problems = []
     tools = tool_versions()
     for k, want in FROZEN_TOOLS.items():
+        if k == "chromium" and "chrome" in tools:
+            continue   # Google Chrome is used on this machine instead (its version is shown on every report)
         got = tools.get(k, "missing")
         if got != want:
             problems.append(f"{k} is {got}, the frozen release uses {want}")
@@ -92,7 +138,11 @@ def check(engine_dir: Path, manifest: dict | None = None):
 
 def stamp():
     """What every report shows about how it was made."""
-    return {"release": RELEASE, "model": MODEL, "tools": dict(FROZEN_TOOLS)}
+    name, ver = browser()
+    tools = {k: v for k, v in FROZEN_TOOLS.items() if not (k == "chromium" and name == "chrome")}
+    if name == "chrome":
+        tools["chrome"] = ver
+    return {"release": RELEASE, "model": MODEL, "tools": tools, "browser": f"{'Google Chrome' if name == 'chrome' else 'Chromium'} {ver}"}
 
 
 def write_manifest(engine_dir: Path, out: Path):

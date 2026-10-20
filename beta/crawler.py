@@ -2772,6 +2772,9 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 continue
             self._wave, self._wave_lanes = wave, lanes
             self._lane_frac = {k: 0.0 for k in range(len(lanes))}
+            from .release import browser
+            name, ver = browser()   # chosen once, before any browser session is open
+            self.log(f"Browser: {'Google Chrome' if name == 'chrome' else 'Chromium'} {ver}")
             ths = [threading.Thread(target=self._lane, args=(k, lane, bufs), daemon=True) for k, lane in enumerate(lanes)]
             for th in ths:
                 th.start()
@@ -2799,8 +2802,8 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
 
     def _lane(self, k, lane, bufs):
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(channel="chromium",   # the full Chromium build, closest to the Chrome learners use
-                                         args=["--autoplay-policy=no-user-gesture-required", "--no-sandbox"])
+            from .release import launch   # Google Chrome when installed, else the frozen Chromium build
+            browser = launch(pw, args=["--autoplay-policy=no-user-gesture-required", "--no-sandbox"])
             try:
                 for j, name in enumerate(lane):
                     if self.blocked and name != "desktop":
