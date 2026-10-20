@@ -57,8 +57,8 @@ Close and reopen the window. Every test then finishes on its own.
 
 - **QC_Review_<course>.xlsx** – the team's QC report: issues with screenshots, Navigation Test, Assessment Test and
   LMS Completion.
-- **SITE_IMPORT_<course>.zip** – to put the result on the eQC360 AI website, open the site, choose
-  **Import PC report** under the upload form, and pick this zip. The whole team then sees the report there, with
+- **SITE_IMPORT_<course>.zip** – to share the result, open the **eQC360 AI PC** website
+  (https://claude.ai/artifact/7frJK7iGTRTxEC4AeGbq6N), choose **Import PC report**, and pick this zip. The whole team then sees the report there, with
   its screenshots.
 
 ## Other options (Command Prompt, in the tester folder)
