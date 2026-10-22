@@ -361,6 +361,11 @@ def _sb_evidence(run_dir, words, f, out_rel, tag=""):
         n_page, n_box, n_score = find_on_pages(cands, quote, hint or None)
         if n_box and n_score >= 0.6 and (n_score > score or not box):
             page, box, score, kind = n_page, n_box, n_score, "notes"
+    if not box and nf.exists() and (f.get("found_in") == "SB-Audio Script" or re.search(r"\bVO\b|voice|narrat|audio",
+                                                                              f.get("message", ""), re.I)):
+        hint = str(f.get("sb_page") or page or "")
+        if hint and (run_dir / "sb" / f"notes{hint}.png").exists():
+            page, kind = int(hint), "notes"   # a VO issue always shows the VO (the notes page), even unmarked
     f["pos_y"] = (box[1] + (10 ** 6 if kind == "notes" else 0)) if box else 10 ** 8   # order within the page
     lines = []
     if box:

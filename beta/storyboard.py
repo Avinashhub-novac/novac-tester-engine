@@ -165,64 +165,35 @@ def render_pages(path: Path, out_dir: Path, max_pages=300):
     return len(pages)
 
 
-def find_on_pages(words_by_page, text, page_hint=None):
-    """The SB page and box that best match `text` (the SB wording quoted in an issue).
-    Returns (page number, [x, y, w, h] or None, score 0..1)."""
-    want = [_norm(w) for w in WORD_RE.findall(text or "") if _norm(w)]
-    if not want:
-        return (int(page_hint) if page_hint else None), None, 0.0
-    want = want[:40]
-    if page_hint and str(page_hint) in words_by_page:
-        # the page the issue names comes first: the same words on another page (a repeated sentence) never win
-        got = find_on_pages({str(page_hint): words_by_page[str(page_hint)]}, text)
-        if got[1] and got[2] >= 0.6:
-            return got
-        if not got[1] and got[2] >= 0.3:
-            return int(page_hint), None, got[2]
-    best = (None, None, 0.0)
-    for pg, words in words_by_page.items():
-        norm = [_norm(w[0]) for w in words]
-        n = len(want)
-        # longest run of the quoted words appearing in order on this page (allowing small gaps)
-        for i in range(len(norm)):
-            if norm[i] != want[0] and (n < 2 or norm[i] != want[1]):
-                continue
-            j, hit, last = i, 0, i
-            for wv in want:
-                for jj in range(j, min(j + 4, len(norm))):
-                    if norm[jj] == wv:
-                        hit += 1
-                        last, j = jj, jj + 1
-                        break
-            score = hit / n
-            if score > best[2]:
-                sel = words[i:last + 1]
-                x0 = min(w[1] for w in sel); y0 = min(w[2] for w in sel)
-                x1 = max(w[1] + w[3] for w in sel); y1 = max(w[2] + w[4] for w in sel)
-                best = (int(pg), [x0, y0, x1 - x0, y1 - y0], score)
-    if best[2] < 0.5:   # fall back to the page sharing the most words
-        ws = set(want)
-        scores = [(len(ws & {_norm(w[0]) for w in words}) / len(ws), pg) for pg, words in words_by_page.items()]
-        if scores:
-            sc, pg = max(scores)
-            if page_hint and sc < 0.3:
-                return int(page_hint), None, sc
-            if sc >= 0.3:
-                return int(pg), None, sc
-        return (int(page_hint) if page_hint else None), None, best[2]
-    return best
+def _split(words):
+    """PDF words split into the same pieces the quote is split into, each with its share of the box:
+    "authorization(P" → "authorization" + "P" (a missing space must never stop a quote from being found)."""
+    out = []
+    for w in words:
+        t = w[0]
+        parts = list(WORD_RE.finditer(t))
+        if len(parts) <= 1:
+            out.append(w)
+            continue
+        n = max(1, len(t))
+        for m in parts:
+            out.append([m.group(0), w[1] + w[3] * m.start() / n, w[2], w[3] * (m.end() - m.start()) / n, w[4]])
+    return out
 
 
-def quote_lines(words, text):
-    """Boxes of the quoted words on one page, one box per printed line (a quote that wraps is marked line by line,
-    never as one block covering both lines). words = that page's [[word, x, y, w, h], …]."""
+def _match(words, text):
+    """(selected words, score 0..1) of the best place on one page where `text` is. Word by word first; if that
+    fails, letter by letter ignoring spaces and punctuation, so "authorization(P A)" is found as
+    "authorization(PA)" or "authorization (P A)" too."""
     want = [_norm(w) for w in WORD_RE.findall(text or "") if _norm(w)][:40]
     if not want or not words:
-        return []
+        return [], 0.0
+    words = _split(words)
     norm = [_norm(w[0]) for w in words]
-    best, best_hit = None, 0
+    n = len(want)
+    best, best_score = [], 0.0
     for i in range(len(norm)):
-        if norm[i] != want[0] and (len(want) < 2 or norm[i] != want[1]):
+        if norm[i] != want[0] and (n < 2 or norm[i] != want[1]):
             continue
         j, hit, sel = i, 0, []
         for wv in want:
@@ -232,21 +203,69 @@ def quote_lines(words, text):
                     sel.append(words[jj])
                     j = jj + 1
                     break
-        if hit > best_hit:
-            best, best_hit = sel, hit
-    if not best:
+        if hit / n > best_score:
+            best, best_score = sel, hit / n
+    if best_score >= 0.8:
+        return best, best_score
+    # letters only: the whole page as one string, each letter knowing its word
+    target = "".join(want)
+    if len(target) < 3:
+        return best, best_score
+    chars, owner = [], []
+    for k, t in enumerate(norm):
+        chars.append(t)
+        owner += [k] * len(t)
+    page = "".join(chars)
+    at = page.find(target)
+    if at < 0 and len(target) > 12:   # most of a long quote is enough
+        for cut in (len(target) * 3 // 4, len(target) // 2):
+            at = page.find(target[:cut])
+            if at >= 0:
+                target = target[:cut]
+                break
+    if at >= 0:
+        ks = sorted(set(owner[at:at + len(target)]))
+        return [words[k] for k in ks], max(best_score, 0.95 if len(target) == len("".join(want)) else 0.7)
+    return best, best_score
+
+
+def _box(sel):
+    x0 = min(w[1] for w in sel); y0 = min(w[2] for w in sel)
+    x1 = max(w[1] + w[3] for w in sel); y1 = max(w[2] + w[4] for w in sel)
+    return [x0, y0, x1 - x0, y1 - y0]
+
+
+def find_on_pages(words_by_page, text, page_hint=None):
+    """The SB page and box that best match `text` (the SB wording quoted in an issue).
+    Returns (page number, [x, y, w, h] or None, score 0..1). The page the issue names wins whenever the words are there."""
+    if not [w for w in WORD_RE.findall(text or "") if _norm(w)]:
+        return (int(page_hint) if page_hint else None), None, 0.0
+    if page_hint and str(page_hint) in words_by_page:
+        sel, sc = _match(words_by_page[str(page_hint)], text)
+        if sel and sc >= 0.6:
+            return int(page_hint), _box(sel), sc
+    best = (None, None, 0.0)
+    for pg, words in words_by_page.items():
+        sel, sc = _match(words, text)
+        if sel and sc > best[2]:
+            best = (int(pg), _box(sel), sc)
+    if best[2] >= 0.6:
+        return best
+    return (int(page_hint) if page_hint else best[0]), None, best[2]
+
+
+def quote_lines(words, text):
+    """Boxes of the quoted words on one page, one box per printed line (a quote that wraps is marked line by line)."""
+    sel, sc = _match(words, text)
+    if not sel or sc < 0.6:
         return []
     lines = []
-    for w in best:   # group by line: same top (within half a line height)
+    for w in sel:   # group by line: same top (within half a line height)
         for ln in lines:
             if abs(ln[0][2] - w[2]) < max(4, w[4] * 0.5):
                 ln.append(w)
                 break
         else:
             lines.append([w])
-    out = []
-    for ln in lines:
-        x0 = min(w[1] for w in ln); y0 = min(w[2] for w in ln)
-        x1 = max(w[1] + w[3] for w in ln); y1 = max(w[2] + w[4] for w in ln)
-        out.append([x0, y0, x1 - x0, y1 - y0])
-    return out
+    return [_box(ln) for ln in lines]
+
