@@ -280,9 +280,9 @@ def auto_checks(pages, marked, variant):
     for pg, core in pieces:
         m = re.search(r"\S( {2,})(?=\S)", core)
         if m:
-            q = snip(core, m.start(), m.end())
             l, r = around(core, m.start(1), m.end(1))
-            add(1, "Extra space between words", q, re.sub(r" {2,}", " ", q), page=pg,
+            q = f"{l}{m.group(1)}{r}"   # just the two words around the gap: that is what gets marked
+            add(1, "Extra space between words", q, f"{l} {r}", page=pg,
                 fix=f"Remove the extra space between “{l}” and “{r}”.")
         m = re.search(r"\w (,|\.(?!\.)|;|:|\?|!)(\s|$)", core)
         if m:

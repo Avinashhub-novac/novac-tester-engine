@@ -26,8 +26,12 @@ ISSUE_LIST = ["Transcript", "Audio", "OST", "Animation", "ARD", "Graphic", "Head
               "Assessment", "Assessment Strategy", "Resource", "Seek Bar", "Slide Title", "Skin", "Video", "Navigation",
               "Content Flow", "SB-Spelling", "SB-Grammar", "SB-Casing", "SB-Audio Script", "SB-OST",
               "SB-OST/Audio Script", "VO INS", "Animation INS"]
-IMG_W = 700          # display width of a screenshot in the cell, px (column F is ~770 px wide)
+IMG_W = 560          # display width of a screenshot in the cell, px (column F is ~770 px wide)
+IMG_MAX_H = 330      # screenshots are shrunk to at most this height so rows stay compact
 MAX_ROW_PX = 540     # Excel's row-height ceiling is 409 pt (~545 px)
+LABELS = re.compile(r"^(Issue identified|Action required|Issue Found in|What is given|What needs to be done|"
+                    r"Provided in SB|Provided in Output|Checklist):")
+CAT_FILL = {"High": "FDE2E1", "Medium": "FFF1D6", "Low": "E5F4E3", "Suggestion": "E3EEFB", "Update": "EFEFEF"}
 LINE_PX = 18
 CHARS_PER_LINE = 105
 
@@ -35,6 +39,8 @@ CHARS_PER_LINE = 105
 def category(f):
     """Maps a finding to the template's issue categories (Description sheet)."""
     c, sev, msg = f["check"], f["severity"], f["message"].lower()
+    if f.get("advice"):   # a suggestion, not a defect (e.g. the storyboard has no knowledge check)
+        return "Suggestion"
     if f.get("blocker"):
         return "High"
     if c in ("assessment", "logic", "interactivity"):
@@ -142,6 +148,28 @@ def sb_feedback(f):
     return f"Issue identified: {what}\nAction required: {fix}"
 
 
+def _rich(text, base_font=None):
+    """The Feedback description with its labels ("Issue identified:", "Action required:" …) in bold."""
+    try:
+        from openpyxl.cell.rich_text import CellRichText, TextBlock
+        from openpyxl.cell.text import InlineFont
+    except Exception:
+        return text
+    name = (base_font.name if base_font is not None else None) or "Calibri"
+    size = (base_font.sz if base_font is not None else None) or 10
+    bold, plain = InlineFont(rFont=name, sz=size, b=True), InlineFont(rFont=name, sz=size)
+    parts = []
+    for k, line in enumerate(text.split("\n")):
+        nl = "\n" if k else ""
+        m = LABELS.match(line)
+        if m:
+            parts.append(TextBlock(bold, nl + m.group(0)))
+            parts.append(TextBlock(plain, line[m.end():]))
+        else:
+            parts.append(TextBlock(plain, nl + line))
+    return CellRichText(*parts)
+
+
 def describe(f):
     return feedback_text(f)
 
@@ -203,11 +231,15 @@ def build(res, meta, run_dir: Path, out_path: Path, review_date=None):
     rank = {"High": 0, "Medium": 1, "Low": 2, "Update": 3, "Suggestion": 4}
 
     def key(f):
+        """Sequential: screen by screen (SB: slide / page by page), top to bottom within a screen; issues about
+        the whole course come after the screens."""
         s = slide_index.get(f.get("slide_id"))
-        if f.get("blocker"):   # the screen the learner cannot pass comes first
-            return (-1, "", 0)
-        return (s["index"] if s and s.get("index") else (0 if not f.get("slide_id") else 9999),
-                f.get("time") or "", rank[category(f)])
+        idx = s["index"] if s and s.get("index") else (f.get("sb_page") or 99999)
+        b = f.get("box") or []
+        pos = f.get("pos_y")
+        if pos is None:
+            pos = (b[1] * 10000 + b[0]) if len(b) == 4 else 10 ** 9
+        return (int(idx), f.get("time") or "", pos, rank[category(f)])
     findings.sort(key=key)
     # desktop issues first; everything found on the phone layout goes to the end under its own heading
     desktop = [f for f in findings if not f.get("mobile")]
@@ -248,10 +280,12 @@ def build(res, meta, run_dir: Path, out_path: Path, review_date=None):
         else:
             ws.cell(r, 5, (s.get("title") or "") if s else "")
         text = describe(f)
-        ws.cell(r, 6, text)
+        ws.cell(r, 6, _rich(text, ws.cell(8, 6).font))
         if f.get("mobile"):
             ws.cell(r, 6).font = Font(name=ws.cell(r, 6).font.name, size=ws.cell(r, 6).font.sz)
         ws.cell(r, 7, category(f))
+        if CAT_FILL.get(category(f)):
+            ws.cell(r, 7).fill = PatternFill("solid", fgColor=CAT_FILL[category(f)])
         ws.cell(r, 8, issue_found_in(f))
         if f.get("assigned_to") or res.get("stage") == "sb":   # storyboard issues go to the ID
             ws.cell(r, 9, f.get("assigned_to") or "ID")
@@ -266,8 +300,8 @@ def build(res, meta, run_dir: Path, out_path: Path, review_date=None):
                 w, h = im.size
             disp_w = IMG_W
             disp_h = round(h * disp_w / w)
-            room = MAX_ROW_PX - text_px - 12
-            if disp_h > room:
+            room = min(IMG_MAX_H, MAX_ROW_PX - text_px - 12)
+            if disp_h > room:   # tall pictures (an SB page) are shrunk to the same height as the others
                 disp_h = max(120, room)
                 disp_w = round(w * disp_h / h)
             xl = XLImage(str(img_path))
@@ -278,6 +312,23 @@ def build(res, meta, run_dir: Path, out_path: Path, review_date=None):
             img_px = disp_h + 12
         ws.row_dimensions[r].height = min(409, max(31.5, (text_px + img_px) * 0.75))
 
+    # tidy: the template's empty bordered rows below the last issue are cleared, and the sheet prints neatly
+    from openpyxl.styles import Border as _B
+    for rr in range(last + 1, 205):
+        for col in range(1, 20):
+            cell = ws.cell(rr, col)
+            if cell.value is None:
+                cell.border = _B()
+                cell.fill = PatternFill(fill_type=None)
+        ws.row_dimensions[rr].height = None
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
+    ws.print_title_rows = "7:7"
+    ws.page_margins.left = ws.page_margins.right = 0.3
+    ws.page_margins.top = ws.page_margins.bottom = 0.5
+    ws.print_area = f"A1:M{last}"
     # dropdowns over every issue row (template validations stop at row 120)
     end = max(last, 120) + 50
     keep = []

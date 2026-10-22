@@ -141,6 +141,11 @@ them). A recap or summary screen repeats earlier content on purpose. Knowledge-c
 correct option and click SUBMIT") repeat on every question on purpose. Writing a number as a numeral in one place and
 in words in another is a mistake only for the same kind of value in the same kind of text (for example two money
 amounts in the VO). Matters of taste or wording that is correct are never mistakes.
+NO KNOWLEDGE CHECK / NO ASSESSMENT: if the storyboard has no knowledge check (CYU) at all, or no assessment at all,
+report it once as a suggestion, not a mistake: {"page": 0, "rule": 5, "issue": "No knowledge check in the storyboard"
+(or "No assessment in the storyboard"), "quote": "", "suggestion": "Add a knowledge check if the course needs one."
+(or "… an assessment …"), "severity": "suggestion", "found_in": "assessment"}. Never report it as an error, and do
+not also report the missing questions or feedback for it.
 DUPLICATION (rule 13) means content repeated by mistake: the same VO or OST paragraph pasted on a screen where it does
 not belong, a screen that repeats the previous one, or the same point made twice on one screen. Option lists reused
 across the parts of one activity, recaps, and repeated instructions are not duplication. Name both pages.

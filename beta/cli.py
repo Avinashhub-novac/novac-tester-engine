@@ -180,7 +180,9 @@ def cmd_merge(a):
             details.append(f"“{v['quote']}”")
         if v.get("explanation"):
             details.append(v["explanation"])
+        advice = str(v.get("severity") or "").lower() == "suggestion"
         add(check=RULE_GROUP.get(rule, "sb_language"), severity=v.get("severity") if v.get("severity") in ("error", "warning") else "warning",
+            advice=advice,
             message=f"SB: {v.get('issue', 'issue')}", slide_id=f"p{page}" if page else "", slide_label=f"Page {page}" if page else "",
             detail="\n".join(details), suggestion=v.get("suggestion", ""), sb_says=v.get("quote", ""), sb_page=page or 0,
             rule=rules.get(rule, ""), found_in=FOUND_IN.get(v.get("found_in"), v.get("found_in") or "SB-OST"),
@@ -282,24 +284,24 @@ def _font(size, bold=True):
 
 
 def _render(src, out, box, vw, tag="", mark=True, more=None):
-    """Saves a sharp JPEG with the issue marked: the exact spot highlighted in bright yellow inside a thick red box
-    (or a red outline around the whole screen when the issue is about the screen as a whole) and a red label.
-    `more` = further boxes of the same issue on this screen."""
+    """Saves a sharp JPEG with the issue's exact spot highlighted in yellow and underlined in red (or a thin red
+    frame round the whole screen when the issue is about the screen as a whole). Nothing is written on the
+    picture: the issue is explained in the Feedback description only. `more` = further spots of the same issue
+    (for example the lines of a quote that wraps). `tag` is kept for callers but no longer drawn."""
     from PIL import Image, ImageDraw
     im = Image.open(src).convert("RGB")
     k = im.width / vw if vw else 1.0
-    red = (230, 0, 18)
-    width = max(4, round(3.5 * k))
+    red = (220, 20, 30)
     if not mark:
-        box, tag = None, ""
+        box = None
 
     def rect(bx):
         x, y, w, h = [v * k for v in bx]
-        pad = 5 * k
-        return [max(2, x - pad), max(2, y - pad), min(im.width - 3, x + w + pad), min(im.height - 3, y + h + pad)]
+        pad = 3 * k
+        return [max(1, x - pad), max(1, y - pad), min(im.width - 2, x + w + pad), min(im.height - 2, y + h + pad)]
     boxes = [b for b in ([box] + list(more or [])) if b] if (mark and box) else []
-    # never outline an empty spot: the marked area must show something (text, a button, a picture) in this very
-    # screenshot – a flat, single-colour area means the object is not visible there (hidden, faded out, not drawn yet)
+    # never mark an empty spot: the area must show something (text, a button, a picture) in this very screenshot –
+    # a flat, single-colour area means the object is not visible there (hidden, faded out, not drawn yet)
     if boxes:
         from PIL import ImageStat
         gray = im.convert("L")
@@ -308,45 +310,24 @@ def _render(src, out, box, vw, tag="", mark=True, more=None):
             x0_, y0_, x1_, y1_ = [int(v) for v in rect(bx)]
             if x1_ - x0_ < 3 or y1_ - y0_ < 3:
                 return False
-            st = ImageStat.Stat(gray.crop((x0_, y0_, x1_, y1_)))
-            return st.stddev[0] >= 4.0
+            return ImageStat.Stat(gray.crop((x0_, y0_, x1_, y1_))).stddev[0] >= 4.0
         boxes = [b for b in boxes if drawn(b)]
-        if not boxes:
-            box, more = None, None   # outline the whole screen instead (the issue is about this screen)
-        elif box not in boxes:
-            box = boxes[0]
-    if boxes:   # bright highlight under the outline, so the spot stands out at a glance
+    if mark and boxes:
         glow = Image.new("RGBA", im.size, (0, 0, 0, 0))
         g = ImageDraw.Draw(glow)
-        for bx in boxes:
-            g.rounded_rectangle(rect(bx), radius=round(6 * k), fill=(255, 235, 0, 70))
+        for bx in boxes:   # a highlighter stroke over the words / the object
+            g.rectangle(rect(bx), fill=(255, 230, 0, 95))
         im = Image.alpha_composite(im.convert("RGBA"), glow).convert("RGB")
-    d = ImageDraw.Draw(im)
-    for bx in boxes[1:]:
-        d.rounded_rectangle(rect(bx), radius=round(6 * k), outline=red, width=width)
-    if not mark:
-        pass
-    elif box:
-        x0, y0, x1, y1 = rect(box)
-    else:  # no single spot: outline the whole screen so it is clear the issue is about this screen
-        inset = max(4, round(3 * k))
-        x0, y0, x1, y1 = inset, inset, im.width - inset - 1, im.height - inset - 1
-    if mark:
-        d.rounded_rectangle([x0, y0, x1, y1], radius=round(6 * k), outline=red, width=width)
-    if mark and tag:
-        f = _font(max(15, round(15 * k)))
-        tw = d.textlength(tag, font=f)
-        th = f.size * 1.25
-        padx, pady = 8 * k / 1.2, 4 * k / 1.2
-        lw, lh = tw + 2 * padx, th + 2 * pady
-        lx = min(max(2, x0), im.width - lw - 2)
-        if not box:  # whole-screen outline: label centred at the top
-            lx = (im.width - lw) / 2
-        ly = y0 - lh - 2 if box and y0 - lh - 2 > 0 else (y1 + 2 if box and y1 + lh + 2 < im.height else y0 + width + 2)
-        if box and x1 + 8 + lw < im.width - 2:   # beside the outline keeps the nearby text readable
-            lx, ly = x1 + 8, max(2, min((y0 + y1 - lh) / 2, im.height - lh - 2))
-        d.rounded_rectangle([lx, ly, lx + lw, ly + lh], radius=round(4 * k), fill=red)
-        d.text((lx + padx, ly + pady), tag, font=f, fill=(255, 255, 255))
+        d = ImageDraw.Draw(im)
+        lw = max(3, round(2.5 * k))
+        for bx in boxes:   # and a red underline just below it
+            x0, y0, x1, y1 = rect(bx)
+            yl = min(im.height - lw, y1 + max(1, round(1 * k)))
+            d.rectangle([x0, yl, x1, yl + lw], fill=red)
+    elif mark:   # no single spot: a thin frame shows the issue is about this screen as a whole
+        d = ImageDraw.Draw(im)
+        w = max(3, round(2.5 * k))
+        d.rectangle([w // 2, w // 2, im.width - 1 - w // 2, im.height - 1 - w // 2], outline=red, width=w)
     if im.width > 1800:
         im = im.resize((1800, round(im.height * 1800 / im.width)), Image.LANCZOS)
     im.save(out, "JPEG", quality=90, optimize=True, progressive=True)
@@ -364,40 +345,73 @@ def _placeholder(out, label):
 
 
 def _sb_evidence(run_dir, words, f, out_rel, tag=""):
-    """Picture of the storyboard page with the SB wording the issue quotes outlined in red."""
-    from PIL import Image
-    from beta.storyboard import find_on_pages
+    """Picture of the storyboard page with the SB words the issue quotes highlighted and underlined. When the
+    words are in the speaker notes of a PowerPoint storyboard (the VO), the notes page of that slide is shown."""
+    import json
+    from PIL import Image, ImageDraw
+    from beta.storyboard import find_on_pages, quote_lines
     quote = f.get("sb_says") or ""
     page, box, score = find_on_pages(words, quote, f.get("sb_page") or None)
+    kind = "page"
+    nf = run_dir / "sb" / "words_notes.json"
+    if nf.exists() and (not box or score < 0.999):
+        notes = json.loads(nf.read_text())
+        hint = str(f.get("sb_page") or page or "")
+        cands = {hint: notes[hint]} if hint in notes else notes
+        n_page, n_box, n_score = find_on_pages(cands, quote, hint or None)
+        if n_box and n_score >= 0.6 and (n_score > score or not box):
+            page, box, score, kind = n_page, n_box, n_score, "notes"
+    f["pos_y"] = (box[1] + (10 ** 6 if kind == "notes" else 0)) if box else 10 ** 8   # order within the page
+    lines = []
+    if box:
+        allw = json.loads((run_dir / "sb" / ("words_notes.json" if kind == "notes" else "words.json")).read_text())
+        lines = quote_lines(allw.get(str(page), []), quote)
     if not page:
         return None
-    src = run_dir / "sb" / f"page{page}.png"
+    src = run_dir / "sb" / f"{kind}{page}.png"
     if not src.exists():
         return None
     im = Image.open(src).convert("RGB")
+    # trim the empty margins (a notes page is mostly white): the picture is then big enough to read in the report
+    from PIL import ImageOps
+    probe = im.crop((0, 0, im.width, int(im.height * (0.93 if kind == "notes" else 1.0))))   # not the page number
+    bb = ImageOps.invert(probe.convert("L")).point(lambda v: 255 if v > 18 else 0).getbbox()
+    if bb:
+        pad = 24
+        x0c, y0c = max(0, bb[0] - pad), max(0, bb[1] - pad)
+        x1c, y1c = min(im.width, bb[2] + pad), min(im.height, bb[3] + pad)
+        if (x1c - x0c) * (y1c - y0c) < im.width * im.height * 0.92:
+            im = im.crop((x0c, y0c, x1c, y1c))
+            if box:
+                box = [box[0] - x0c, box[1] - y0c, box[2], box[3]]
+            lines = [[b[0] - x0c, b[1] - y0c, b[2], b[3]] for b in lines]
     portrait = im.height > im.width * 1.1
-    if box and portrait:   # a band of the page around the quoted text, wide enough to read the screen's table
+    if box and portrait and kind == "page":   # a band of a long page around the quoted words
         top = max(0, int(box[1] - 300))
         bottom = min(im.height, int(box[1] + box[3] + 300))
         im = im.crop((0, top, im.width, bottom))
         box = [box[0], box[1] - top, box[2], box[3]]
+        lines = [[b[0], b[1] - top, b[2], b[3]] for b in lines]
+    if len(lines) > 1:
+        box, more = lines[0], lines[1:]
+    else:
+        more = None
     tmp = run_dir / (out_rel + ".png")
     im.save(tmp)
-    _render(tmp, run_dir / out_rel, box, im.width, "", mark=bool(box))   # no label on the page: it would cover words
+    _render(tmp, run_dir / out_rel, box, im.width, mark=bool(box), more=more)
     tmp.unlink()
-    # a red band above the page names it (and the issue), so the label never hides any SB text
-    from PIL import ImageDraw
+    # a slim band above names the page (nothing about the issue: that is in the Feedback description)
     im2 = Image.open(run_dir / out_rel).convert("RGB")
-    band = 54
+    fs = max(22, im2.width // 55)   # the same size on every picture once it is shrunk into the report
+    band = int(fs * 2)
     out_im = Image.new("RGB", (im2.width, im2.height + band), (255, 255, 255))
     out_im.paste(im2, (0, band))
     d = ImageDraw.Draw(out_im)
-    d.rectangle([0, 0, im2.width, band - 6], fill=(225, 29, 29))
-    label = f"SB page {page}" + (f" – {tag}" if tag else "") + ("" if box else "   (the words are not on the page picture, e.g. in the speaker notes)")
-    f = _font(26)
-    while d.textlength(label, font=f) > im2.width - 28 and len(label) > 20:
-        label = label[:-4] + "…"
-    d.text((14, 12), label, font=f, fill=(255, 255, 255))
+    d.rectangle([0, 0, im2.width, band - 4], fill=(45, 55, 72))
+    label = f"SB page {page}" + (" · speaker notes (VO)" if kind == "notes" else "")
+    if kind == "notes" and f.get("found_in") in ("SB-OST", "", None):
+        f["found_in"] = "SB-Audio Script"   # the words are in the VO (speaker notes), not on screen
+    d.text((int(fs * 0.6), int(fs * 0.4)), label, font=_font(fs), fill=(255, 255, 255))
     out_im.save(run_dir / out_rel, "JPEG", quality=90, optimize=True)
     return out_rel
 
@@ -559,6 +573,9 @@ def cmd_bundle(a):
     for i, f in enumerate(res["findings"]):
         sid = f.get("slide_id") or ""
         slide = slides.get(sid)
+        if f.get("advice") and not sid:   # a suggestion about the whole course / storyboard: no picture to show
+            f["screenshot"], f["box"] = "", None
+            continue
         src_rel = f.get("screenshot") or ""
         if src_rel and not (run_dir / src_rel).exists():
             src_rel = ""

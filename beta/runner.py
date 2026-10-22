@@ -155,6 +155,8 @@ class Run:
         from .quiz import assessment_parts as _ap
         if not any(s.is_quiz for s in course.slides) and not _ap(course)[1]:
             passes = [p for p in passes if p != "assessment"]
+            self.col.add("assessment", "warning", "No knowledge check or assessment in this course", advice=True,
+                         found_in="Assessment", fix="Add a knowledge check or an assessment if the course needs one.")
         # time limit: twice the course's running time plus 10 minutes (at least 20), so a test never hangs
         play_min = sum(min(s.duration_ms, 600000) for s in course.slides) / 60000.0
         limit = min(config.MAX_CRAWL_MINUTES, max(20.0, 2 * play_min + 10))

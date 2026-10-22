@@ -5,6 +5,7 @@ script, developer notes); PDFs, PowerPoint and Excel storyboards are read too. T
 are kept as "cell | cell | cell" lines so screen numbers stay next to their content.
 """
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -82,9 +83,13 @@ def _xlsx(path):
     return "\n".join(out)
 
 
-def _convert(path, fmt):
+NOTES_PDF = ('pdf:impress_pdf_Export:{"ExportNotesPages":{"type":"boolean","value":"true"},'
+             '"ExportOnlyNotesPages":{"type":"boolean","value":"true"}}')
+
+
+def _convert(path, fmt, target=None):
     tmp = Path(tempfile.mkdtemp())
-    subprocess.run(["soffice", "--headless", "--convert-to", fmt, "--outdir", str(tmp), str(path)],
+    subprocess.run(["soffice", "--headless", "--convert-to", target or fmt, "--outdir", str(tmp), str(path)],
                    capture_output=True, timeout=300)
     hits = list(tmp.glob("*." + fmt))
     if not hits:
@@ -115,28 +120,48 @@ def _norm(w):
     return re.sub(r"[^\w]+", "", w.lower())
 
 
-def render_pages(path: Path, out_dir: Path, max_pages=300):
-    """Saves every SB page as a picture (out_dir/p-N.png) and the position of each word on it
-    (out_dir/words.json: {"1": [[word, x, y, w, h], …]} in picture pixels). Returns the page count."""
+def _render_pdf(pdf, out_dir: Path, prefix, max_pages):
+    """Pictures (out_dir/<prefix>N.png) and word positions {"N": [[word, x, y, w, h], …]} of one PDF."""
     import html
-    out_dir.mkdir(parents=True, exist_ok=True)
-    pdf = path if path.suffix.lower() == ".pdf" else _convert(path, "pdf")
-    subprocess.run(["pdftoppm", "-r", str(DPI), "-png", "-l", str(max_pages), str(pdf), str(out_dir / "p")],
+    tmp = out_dir / f"_{prefix}"
+    tmp.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["pdftoppm", "-r", str(DPI), "-png", "-l", str(max_pages), str(pdf), str(tmp / "p")],
                    capture_output=True, timeout=600)
-    pages = {}
-    for p in out_dir.glob("p-*.png"):   # pdftoppm pads the number (p-01.png): store as p-1.png
+    for p in tmp.glob("p-*.png"):   # pdftoppm pads the number (p-01.png): store as <prefix>1.png
         n = int(p.stem.split("-")[-1])
-        p.rename(out_dir / f"page{n}.png")
+        p.replace(out_dir / f"{prefix}{n}.png")
+    shutil.rmtree(tmp, ignore_errors=True)
     bbox = subprocess.run(["pdftotext", "-bbox-layout", "-l", str(max_pages), str(pdf), "-"],
                           capture_output=True, text=True, timeout=600).stdout
     k = DPI / 72.0
+    pages = {}
     for n, body in enumerate(re.findall(r"<page[^>]*>(.*?)</page>", bbox, re.S), 1):
         words = []
         for m in re.finditer(r'<word xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" yMax="([\d.]+)">(.*?)</word>', body):
             x0, y0, x1, y1 = (float(m.group(i)) * k for i in range(1, 5))
             words.append([html.unescape(m.group(5)), round(x0, 1), round(y0, 1), round(x1 - x0, 1), round(y1 - y0, 1)])
         pages[str(n)] = words
-    (out_dir / "words.json").write_text(__import__("json").dumps(pages))
+    return pages
+
+
+def render_pages(path: Path, out_dir: Path, max_pages=300):
+    """Saves every SB page as a picture (out_dir/pageN.png) and the position of each word on it
+    (out_dir/words.json). A PowerPoint storyboard also gets its notes pages – the slide with its speaker notes
+    (the VO) underneath – as out_dir/notesN.png and out_dir/words_notes.json, so issues in the VO can be shown
+    and marked too. Returns the page count."""
+    import json
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pdf = path if path.suffix.lower() == ".pdf" else _convert(path, "pdf")
+    pages = _render_pdf(pdf, out_dir, "page", max_pages)
+    (out_dir / "words.json").write_text(json.dumps(pages))
+    if path.suffix.lower() in (".pptx", ".ppt", ".odp"):
+        try:
+            notes_pdf = _convert(path, "pdf", NOTES_PDF)
+            notes = _render_pdf(notes_pdf, out_dir, "notes", max_pages)
+            if len(notes) == len(pages):   # one notes page per slide picture: same numbering
+                (out_dir / "words_notes.json").write_text(json.dumps(notes))
+        except Exception:
+            pass
     return len(pages)
 
 
@@ -186,3 +211,42 @@ def find_on_pages(words_by_page, text, page_hint=None):
                 return int(pg), None, sc
         return (int(page_hint) if page_hint else None), None, best[2]
     return best
+
+
+def quote_lines(words, text):
+    """Boxes of the quoted words on one page, one box per printed line (a quote that wraps is marked line by line,
+    never as one block covering both lines). words = that page's [[word, x, y, w, h], …]."""
+    want = [_norm(w) for w in WORD_RE.findall(text or "") if _norm(w)][:40]
+    if not want or not words:
+        return []
+    norm = [_norm(w[0]) for w in words]
+    best, best_hit = None, 0
+    for i in range(len(norm)):
+        if norm[i] != want[0] and (len(want) < 2 or norm[i] != want[1]):
+            continue
+        j, hit, sel = i, 0, []
+        for wv in want:
+            for jj in range(j, min(j + 4, len(norm))):
+                if norm[jj] == wv:
+                    hit += 1
+                    sel.append(words[jj])
+                    j = jj + 1
+                    break
+        if hit > best_hit:
+            best, best_hit = sel, hit
+    if not best:
+        return []
+    lines = []
+    for w in best:   # group by line: same top (within half a line height)
+        for ln in lines:
+            if abs(ln[0][2] - w[2]) < max(4, w[4] * 0.5):
+                ln.append(w)
+                break
+        else:
+            lines.append([w])
+    out = []
+    for ln in lines:
+        x0 = min(w[1] for w in ln); y0 = min(w[2] for w in ln)
+        x1 = max(w[1] + w[3] for w in ln); y1 = max(w[2] + w[4] for w in ln)
+        out.append([x0, y0, x1 - x0, y1 - y0])
+    return out

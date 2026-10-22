@@ -51,6 +51,7 @@ class Finding:
     course_says: str = "" # content mapping: what the course shows (the SB wording is in sb_says)
     fix: str = ""         # what needs to be done (report: "What needs to be done")
     blocker: bool = False # the learner cannot go past this screen: testing stopped here
+    advice: bool = False  # a suggestion, not a defect (report category "Suggestion")
 
     def to_dict(self):
         return asdict(self)
