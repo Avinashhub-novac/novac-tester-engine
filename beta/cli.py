@@ -165,11 +165,15 @@ def cmd_merge(a):
                 screenshot=next((x.get("shot", "") for x in res.get("slides", []) if x.get("id") == sid), ""))
     rules = {r["rule"]: r["text"] for r in (tasks.get("sb_review") or {}).get("rules", [])}
     from beta.sbreview import RULE_GROUP, FOUND_IN
+    from beta.sbreview import META_LABEL, DEV_SENTENCE
     for v in ans.get("sb_review", []):
         try:
             rule = int(v.get("rule") or 1)
         except (TypeError, ValueError):
             rule = 1
+        q = str(v.get("quote") or "")
+        if rule in (6, 10, 13) and (META_LABEL.match(q) or DEV_SENTENCE.search(q)):
+            continue   # notes for the developer are not course content (team rule): never duplication / OST-VO / title issues
         page = int(v.get("page") or 0) or None
         details = []
         if v.get("quote"):
@@ -362,15 +366,22 @@ def _sb_evidence(run_dir, words, f, out_rel, tag=""):
         box = [box[0], box[1] - top, box[2], box[3]]
     tmp = run_dir / (out_rel + ".png")
     im.save(tmp)
-    _render(tmp, run_dir / out_rel, box, im.width, (tag or f"SB page {page}") if box else "", mark=bool(box))
+    _render(tmp, run_dir / out_rel, box, im.width, "", mark=bool(box))   # no label on the page: it would cover words
     tmp.unlink()
-    if not box:   # no exact spot: put the page number on the picture so it can be found
-        im2 = Image.open(run_dir / out_rel)
-        from PIL import ImageDraw
-        d = ImageDraw.Draw(im2)
-        d.rounded_rectangle([8, 8, 220, 52], radius=6, fill=(225, 29, 29))
-        d.text((20, 14), f"SB page {page}", font=_font(26), fill=(255, 255, 255))
-        im2.save(run_dir / out_rel, "JPEG", quality=90)
+    # a red band above the page names it (and the issue), so the label never hides any SB text
+    from PIL import ImageDraw
+    im2 = Image.open(run_dir / out_rel).convert("RGB")
+    band = 54
+    out_im = Image.new("RGB", (im2.width, im2.height + band), (255, 255, 255))
+    out_im.paste(im2, (0, band))
+    d = ImageDraw.Draw(out_im)
+    d.rectangle([0, 0, im2.width, band - 6], fill=(225, 29, 29))
+    label = f"SB page {page}" + (f" – {tag}" if tag else "") + ("" if box else "   (the words are not on the page picture, e.g. in the speaker notes)")
+    f = _font(26)
+    while d.textlength(label, font=f) > im2.width - 28 and len(label) > 20:
+        label = label[:-4] + "…"
+    d.text((14, 12), label, font=f, fill=(255, 255, 255))
+    out_im.save(run_dir / out_rel, "JPEG", quality=90, optimize=True)
     return out_rel
 
 

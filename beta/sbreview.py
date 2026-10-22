@@ -128,8 +128,11 @@ def _pptx_marked(path):
                 lines.append(t)
         return lines
 
-    out = []
-    for i, slide in enumerate(Presentation(str(path)).slides, 1):
+    out, i = [], 0
+    for slide in Presentation(str(path)).slides:
+        if slide._element.get("show") == "0":
+            continue   # hidden slides are not in the page pictures: numbering follows the pictures
+        i += 1
         out.append(f"=== SB slide {i} ===")
         for sh in slide.shapes:
             if sh.has_text_frame:
@@ -180,24 +183,78 @@ def page_titles(pages):
 
 
 # ---------------------------------------------------------------- mechanical checks
+# Rows of the SB template that are notes for the developer, not course content: they are only spell-checked by the
+# reviewer, never checked for spacing, duplication or OST / VO match (the same note on many screens is normal).
+META_LABEL = re.compile(
+    r"^\W*(screen\s*objective|objective\s*of\s*the\s*screen|description|screen\s*description|developer|dev\.?\s*notes?|"
+    r"notes?\s*(to|for)\s*(the\s*)?(developer|dev|graphics?|team)|graphic(s)?(\s*(notes?|instructions?|description))?|"
+    r"animation|interactivity|interaction|instructions?\s*(to|for)|navigation|learner\s*action|audio\s*script|"
+    r"programming|programmer|reference|references|source|image\s*(id|ref|reference|description)|visual|layout|"
+    r"screen\s*type|template|asset|media|transition|timing|sync)\b", re.I)
+DEV_SENTENCE = re.compile(
+    r"\b(the\s+learner\s+(clicks?|selects?|drags?|hovers?|proceeds?|navigates?|is\s+taken)|learners?\s+(click|select|drag)|"
+    r"clicks?\s+(on\s+)?(the\s+)?(next|submit|button|icon|tab)|screen\s+(appears|presents|shows|displays)|"
+    r"(appears|is\s+displayed|is\s+shown)\s+on\s+(the\s+)?screen|added\s+in\s+the\s+notes|notes\s+section|"
+    r"(animated|animation)\b|the\s+next\s+button|placeholder|on\s+click|fade[sd]?\s+in|pop[- ]?up\s+(appears|opens))", re.I)
+RECAP = re.compile(r"\b(recap|summary|summari[sz]e|key\s+takeaways?|let'?s\s+review|review\s+of)\b", re.I)
+
+
+def _sections(marked):
+    """{slide number: text} for a PowerPoint storyboard (one slide = one page of the pictures)."""
+    out, cur = {}, None
+    for line in marked.splitlines():
+        m = re.fullmatch(r"=== SB slide (\d+) ===", line.strip())
+        if m:
+            cur = int(m.group(1))
+            out[cur] = []
+        elif cur is not None:
+            out[cur].append(line)
+    return {k: "\n".join(v) for k, v in out.items()}
+
+
+def _content_cells(line):
+    """The course-content pieces of one line of SB text: developer rows and notes are left out."""
+    cells = [c.strip() for c in line.split(" | ")]
+    if cells and META_LABEL.match(cells[0]):
+        return []   # a row such as "Description | …", "Audio script | …", "Screen objective | …"
+    out = []
+    for c in cells:
+        if c.lower().startswith("notes: "):
+            c = c[7:]   # PowerPoint speaker notes hold the VO: they are content
+        for piece in c.split(" / "):   # our own joiner between paragraphs of one cell
+            piece = piece.strip()
+            if piece and not META_LABEL.match(piece) and not re.fullmatch(r"=== SB slide \d+ ===", piece):
+                out.append(piece)
+    return out
+
+
 def auto_checks(pages, marked, variant):
     """Returns issues found by rules (no judgement needed). Each: {page, rule, group, issue, quote, suggestion, severity}.
-    Text checks run on the storyboard's own text (exact spacing); the page is then found in the page pictures' text."""
+    Text checks run on the storyboard's own text (exact spacing), on course content only (VO, OST, questions and
+    feedback – never the notes for the developer); the page is the slide the text is on (PowerPoint) or the page
+    of the pictures that holds it (Word)."""
     issues = []
     if variant not in ("us", "uk"):
         variant = majority_variant(pages)
     norm_pages = {n: re.sub(r"\s+", " ", t) for n, t in pages.items()}
+    plain = re.sub(r"\*\*|\^|(?<!\w)_|_(?!\w)", "", marked)
+    sections = _sections(plain)   # PowerPoint: the text of each slide, speaker notes included
 
-    def page_of(snippet):
+    def page_of(snippet, prefer=None):
         key = re.sub(r"\s+", " ", snippet).strip()
+        if prefer:
+            return prefer
         for k in (key, key[:40], key[-40:]):
             for n, t in norm_pages.items():
                 if k and k in t:
                     return n
-        return min(pages) if pages else 1
+        return None
 
-    def add(rule, issue, quote, suggestion="", severity="warning", found_in="ost", page=None):
-        issues.append({"page": page or page_of(quote), "rule": rule, "group": RULE_GROUP[rule], "issue": issue,
+    def add(rule, issue, quote, suggestion="", severity="warning", found_in="ost", page=None, detail=""):
+        pg = page or page_of(quote)
+        if not pg:
+            return   # the text could not be placed on a page: not reported rather than shown on the wrong page
+        issues.append({"page": pg, "rule": rule, "group": RULE_GROUP[rule], "issue": issue, "detail": detail,
                        "quote": quote, "suggestion": suggestion, "severity": severity, "found_in": found_in})
 
     def snip(core, a, b):
@@ -209,24 +266,24 @@ def auto_checks(pages, marked, variant):
             b += 1
         return core[a:b].strip()
 
-    plain = re.sub(r"\*\*|\^|(?<!\w)_|_(?!\w)", "", marked)
-    for line in plain.splitlines():
-        for cell in line.split(" | "):
-            core = cell.strip()
-            if not core or re.fullmatch(r"=== SB slide \d+ ===", core):
-                continue
-            m = re.search(r"\S( {2,})(?=\S)", core)
-            if m:
-                q = snip(core, m.start(), m.end())
-                add(1, "Extra space between words", q, re.sub(r" {2,}", " ", q))
-            m = re.search(r"\w (,|\.(?!\.)|;|:|\?|!)(\s|$)", core)
-            if m:
-                q = snip(core, m.start(), m.end())
-                add(1, "Space before a punctuation mark", q, q.replace(" " + m.group(1), m.group(1)))
-            m = re.search(r"[a-z][,;][A-Za-z]", core)
-            if m:
-                q = snip(core, m.start(), m.end())
-                add(1, "Missing space after a punctuation mark", q)
+    # (page, content piece) in reading order
+    if sections:
+        pieces = [(n, c) for n in sorted(sections) for line in sections[n].splitlines() for c in _content_cells(line)]
+    else:
+        pieces = [(None, c) for line in plain.splitlines() for c in _content_cells(line)]
+    for pg, core in pieces:
+        m = re.search(r"\S( {2,})(?=\S)", core)
+        if m:
+            q = snip(core, m.start(), m.end())
+            add(1, "Extra space between words", q, re.sub(r" {2,}", " ", q), page=pg)
+        m = re.search(r"\w (,|\.(?!\.)|;|:|\?|!)(\s|$)", core)
+        if m:
+            q = snip(core, m.start(), m.end())
+            add(1, "Space before a punctuation mark", q, q.replace(" " + m.group(1), m.group(1)), page=pg)
+        m = re.search(r"[a-z][,;][A-Za-z]", core)
+        if m:
+            q = snip(core, m.start(), m.end())
+            add(1, "Missing space after a punctuation mark", q, page=pg)
     # US / UK spelling
     for n, text in pages.items():
         words = set(re.findall(r"[a-z]+", text.lower()))
@@ -241,20 +298,13 @@ def auto_checks(pages, marked, variant):
                     add(7, f"{'UK' if variant == 'us' else 'US'} spelling in a {'US' if variant == 'us' else 'UK'} English course",
                         w, right + w[len(wrong):], "warning" if us in AMBIGUOUS else "error", "spelling", page=n)
     # ordinals not set as superscript (needs the formatting-marked text)
-    for m in re.finditer(r"\b(\d+)(st|nd|rd|th)\b", re.sub(r"\^[^^]*\^", "", marked)):
-        add(12, "Ordinal ending is not in superscript", m.group(0), f"{m.group(1)} with “{m.group(2)}” in superscript")
-    # the same long sentence more than once
-    seen = set()
-    for sent in re.split(r"(?<=[.!?])\s+|\n", plain):
-        sent = sent.strip(" |-•")
-        if len(sent.split()) >= 10:
-            key = re.sub(r"[^\w ]", "", sent.lower())
-            if key in seen:
-                k = re.sub(r"\s+", " ", sent).strip()[:60]
-                hits = [n for n, t in norm_pages.items() if k in t]
-                add(13, "The same sentence appears more than once", sent[:200], "", "warning", "flow",
-                    page=hits[1] if len(hits) > 1 else None)
-            seen.add(key)
+    unsup = re.sub(r"\^[^^]*\^", "", marked)
+    for sec_n, sec in (_sections(unsup).items() if sections else [(None, unsup)]):
+        for m in re.finditer(r"\b(\d+)(st|nd|rd|th)\b", sec):
+            add(12, "Ordinal ending is not in superscript", m.group(0), f"{m.group(1)} with “{m.group(2)}” in superscript",
+                page=sec_n)
+    # duplicated content is judged by the reviewer (rule 13): reused option lists, recaps and repeated
+    # instructions are normal, so a word-for-word match alone is not a mistake
     out, keys = [], set()
     for i in issues:   # one finding per (page, rule, quote)
         k = (i["page"], i["rule"], i["quote"].lower())

@@ -215,7 +215,7 @@ def _request(state):
             sbr.pop(key, None)
     pics = []
     if sbr.get("page_pictures"):
-        for k in (sbr.get("pages_with_pictures") or [])[:20]:
+        for k in (sbr.get("pages_with_pictures") or [])[:60]:
             p = Path(sbr["page_pictures"]) / f"page{k}.png"
             if p.exists():
                 pics.append((k, p))

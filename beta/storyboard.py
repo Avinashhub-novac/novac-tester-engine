@@ -107,11 +107,12 @@ def read_text(path: Path) -> str:
 
 # ---------------------------------------------------------------- page pictures (for "Not as per SB" evidence)
 DPI = 150
-WORD_RE = re.compile(r"[\w']+")
+WORD_RE = re.compile(r"[\w'’‘]+")
 
 
 def _norm(w):
-    return re.sub(r"[^\w']+", "", w.lower())
+    """Words compare without case and apostrophes (You’ve = You've = youve)."""
+    return re.sub(r"[^\w]+", "", w.lower())
 
 
 def render_pages(path: Path, out_dir: Path, max_pages=300):
@@ -146,6 +147,13 @@ def find_on_pages(words_by_page, text, page_hint=None):
     if not want:
         return (int(page_hint) if page_hint else None), None, 0.0
     want = want[:40]
+    if page_hint and str(page_hint) in words_by_page:
+        # the page the issue names comes first: the same words on another page (a repeated sentence) never win
+        got = find_on_pages({str(page_hint): words_by_page[str(page_hint)]}, text)
+        if got[1] and got[2] >= 0.6:
+            return got
+        if not got[1] and got[2] >= 0.3:
+            return int(page_hint), None, got[2]
     best = (None, None, 0.0)
     for pg, words in words_by_page.items():
         norm = [_norm(w[0]) for w in words]
@@ -162,8 +170,6 @@ def find_on_pages(words_by_page, text, page_hint=None):
                         last, j = jj, jj + 1
                         break
             score = hit / n
-            if page_hint and str(page_hint) == pg:
-                score += 0.05
             if score > best[2]:
                 sel = words[i:last + 1]
                 x0 = min(w[1] for w in sel); y0 = min(w[2] for w in sel)

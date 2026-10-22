@@ -637,7 +637,7 @@ class Run:
             self.col.ran(g)
         for i in auto:
             self.col.add(i["group"], i["severity"], f"SB: {i['issue']}", slide_id=f"p{i['page']}",
-                         slide_label=f"Page {i['page']}", detail=f"“{i['quote']}”", suggestion=i.get("suggestion", ""),
+                         slide_label=f"Page {i['page']}", detail=f"“{i['quote']}”" + (f"\n{i['detail']}" if i.get("detail") else ""), suggestion=i.get("suggestion", ""),
                          found_in=sbreview.FOUND_IN.get(i.get("found_in"), "SB-OST"), sb_says=i["quote"],
                          sb_page=i["page"], rule=sbreview.RULES[i["rule"] - 1][1])
         self.tasks["sb_review"] = {
