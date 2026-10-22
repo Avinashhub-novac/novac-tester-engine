@@ -129,7 +129,7 @@ def _short_quote(q, n=160):
 
 
 def sb_feedback(f):
-    """SB QC: two lines – what the issue is, in short, and how to fix it."""
+    """SB QC: two lines – what the issue is, in short, and the action required to fix it."""
     issue = (f.get("message") or "Issue").removeprefix("SB: ").strip().rstrip(".")
     quote = _short_quote(f.get("sb_says") or "")
     what = f"{issue}: “{quote}”" if quote and quote.lower() not in issue.lower() else issue + "."
@@ -139,7 +139,7 @@ def sb_feedback(f):
         fix = f"Change “{quote}” to “{_short_quote(sug)}”." if quote else f"Change it to “{_short_quote(sug)}”."
     if not fix:
         fix = "Correct this in the storyboard."
-    return f"What is the issue: {what}\nHow to fix: {fix}"
+    return f"What is the issue: {what}\nAction required: {fix}"
 
 
 def describe(f):
