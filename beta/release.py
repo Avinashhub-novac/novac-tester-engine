@@ -14,7 +14,7 @@ import re
 import subprocess
 from pathlib import Path
 
-RELEASE = "1.5.10"
+RELEASE = "1.5.11"
 MODEL = "claude-opus-5-5"
 
 # Exact versions the release was built and tested with.

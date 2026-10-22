@@ -151,7 +151,7 @@ sentence, the screen description, or a summary of the problem. If the mistake is
 from the "Notes:" line.
 Report every real problem once, on the page where it is, one problem per entry (a mistake in the VO is its own entry,
 quoted from the VO). tasks.sb_review.already_found lists issues the engine already reported: do not repeat them.
-THE REPORT SHOWS EACH ISSUE AS TWO LINES – "What is the issue" (your "issue", followed by your "quote") and "Action
+THE REPORT SHOWS EACH ISSUE AS TWO LINES – "Issue identified" (your "issue", followed by your "quote") and "Action
 required" (your "suggestion"). So: "issue" is a short, complete description of what is wrong (at most 12 words, e.g.
 "The sentence ends with two full stops", "IFRS is not spelled out at first use", "Y9 appears twice in the table
 header"); "suggestion" says exactly how to fix it – for a wording fix "Change “wrong words” to “right words”.", otherwise

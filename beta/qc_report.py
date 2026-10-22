@@ -139,7 +139,7 @@ def sb_feedback(f):
         fix = f"Change “{quote}” to “{_short_quote(sug)}”." if quote else f"Change it to “{_short_quote(sug)}”."
     if not fix:
         fix = "Correct this in the storyboard."
-    return f"What is the issue: {what}\nAction required: {fix}"
+    return f"Issue identified: {what}\nAction required: {fix}"
 
 
 def describe(f):
