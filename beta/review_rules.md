@@ -151,6 +151,12 @@ sentence, the screen description, or a summary of the problem. If the mistake is
 from the "Notes:" line.
 Report every real problem once, on the page where it is, one problem per entry (a mistake in the VO is its own entry,
 quoted from the VO). tasks.sb_review.already_found lists issues the engine already reported: do not repeat them.
+THE REPORT SHOWS EACH ISSUE AS TWO LINES – "What is the issue" (your "issue", followed by your "quote") and "How to
+fix" (your "suggestion"). So: "issue" is a short, complete description of what is wrong (at most 12 words, e.g.
+"The sentence ends with two full stops", "IFRS is not spelled out at first use", "Y9 appears twice in the table
+header"); "suggestion" says exactly how to fix it – for a wording fix "Change “wrong words” to “right words”.", otherwise
+one short instruction (e.g. "Add the correct and incorrect feedback for this question."). Do not repeat the issue in
+the suggestion.
 Entry: {"page": SB page number, "screen": the SB screen number shown on that page ("" if none), "screen_title": that
 screen's title, "rule": rule number, "issue": short plain description (e.g. "Bullet points end differently", "Recap
 screen is missing", "Image does not match the topic"), "quote": the exact words from the page text that show the

@@ -93,6 +93,8 @@ def feedback_text(f):
     """The Feedback description, in the team's format:
     Issue Found in / What is given / What needs to be done / Provided in SB / Provided in Output."""
     from .wording import default_fix
+    if f.get("check", "").startswith("sb_"):
+        return sb_feedback(f)
     msg = f.get("message", "")
     if msg.startswith("SB: "):
         msg = msg[4:]
@@ -119,6 +121,25 @@ def feedback_text(f):
     if f.get("rule"):
         out.append("Checklist: " + f["rule"])
     return "\n".join(out)
+
+
+def _short_quote(q, n=160):
+    q = re.sub(r"\s*/\s*", " ", re.sub(r"\s+", " ", (q or "").replace("\n", " "))).strip()
+    return q if len(q) <= n else q[:n].rsplit(" ", 1)[0] + " …"
+
+
+def sb_feedback(f):
+    """SB QC: two lines – what the issue is, in short, and how to fix it."""
+    issue = (f.get("message") or "Issue").removeprefix("SB: ").strip().rstrip(".")
+    quote = _short_quote(f.get("sb_says") or "")
+    what = f"{issue}: “{quote}”" if quote and quote.lower() not in issue.lower() else issue + "."
+    fix = (f.get("fix") or "").strip()
+    sug = (f.get("suggestion") or "").strip()
+    if not fix and sug:
+        fix = f"Change “{quote}” to “{_short_quote(sug)}”." if quote else f"Change it to “{_short_quote(sug)}”."
+    if not fix:
+        fix = "Correct this in the storyboard."
+    return f"What is the issue: {what}\nHow to fix: {fix}"
 
 
 def describe(f):

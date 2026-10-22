@@ -250,12 +250,18 @@ def auto_checks(pages, marked, variant):
                     return n
         return None
 
-    def add(rule, issue, quote, suggestion="", severity="warning", found_in="ost", page=None, detail=""):
+    def add(rule, issue, quote, suggestion="", severity="warning", found_in="ost", page=None, detail="", fix=""):
         pg = page or page_of(quote)
         if not pg:
             return   # the text could not be placed on a page: not reported rather than shown on the wrong page
         issues.append({"page": pg, "rule": rule, "group": RULE_GROUP[rule], "issue": issue, "detail": detail,
-                       "quote": quote, "suggestion": suggestion, "severity": severity, "found_in": found_in})
+                       "quote": quote, "suggestion": suggestion, "severity": severity, "found_in": found_in, "fix": fix})
+
+    def around(core, a, b):
+        """The words just before and after a spot: (“recognition”, “and”)."""
+        left = re.findall(r"\S+", core[:a])
+        right = re.findall(r"\S+", core[b:])
+        return (left[-1] if left else ""), (right[0] if right else "")
 
     def snip(core, a, b):
         """A few whole words around core[a:b]."""
@@ -275,15 +281,21 @@ def auto_checks(pages, marked, variant):
         m = re.search(r"\S( {2,})(?=\S)", core)
         if m:
             q = snip(core, m.start(), m.end())
-            add(1, "Extra space between words", q, re.sub(r" {2,}", " ", q), page=pg)
+            l, r = around(core, m.start(1), m.end(1))
+            add(1, "Extra space between words", q, re.sub(r" {2,}", " ", q), page=pg,
+                fix=f"Remove the extra space between “{l}” and “{r}”.")
         m = re.search(r"\w (,|\.(?!\.)|;|:|\?|!)(\s|$)", core)
         if m:
             q = snip(core, m.start(), m.end())
-            add(1, "Space before a punctuation mark", q, q.replace(" " + m.group(1), m.group(1)), page=pg)
+            l, _ = around(core, m.start() + 1, m.start() + 1)
+            add(1, "Space before a punctuation mark", q, q.replace(" " + m.group(1), m.group(1)), page=pg,
+                fix=f"Remove the space between “{l}” and “{m.group(1)}”.")
         m = re.search(r"[a-z][,;][A-Za-z]", core)
         if m:
             q = snip(core, m.start(), m.end())
-            add(1, "Missing space after a punctuation mark", q, page=pg)
+            w = re.search(r"\S*$", core[:m.start() + 2]).group(0) + re.match(r"\S*", core[m.start() + 2:]).group(0)
+            add(1, "Missing space after a punctuation mark", q, page=pg,
+                fix=f"Add a space after “{m.group(0)[1]}” in “{w}”.")
     # US / UK spelling
     for n, text in pages.items():
         words = set(re.findall(r"[a-z]+", text.lower()))
@@ -296,13 +308,14 @@ def auto_checks(pages, marked, variant):
                     if w.startswith(right):
                         continue
                     add(7, f"{'UK' if variant == 'us' else 'US'} spelling in a {'US' if variant == 'us' else 'UK'} English course",
-                        w, right + w[len(wrong):], "warning" if us in AMBIGUOUS else "error", "spelling", page=n)
+                        w, right + w[len(wrong):], "warning" if us in AMBIGUOUS else "error", "spelling", page=n,
+                        fix=f"Change “{w}” to “{right + w[len(wrong):]}”.")
     # ordinals not set as superscript (needs the formatting-marked text)
     unsup = re.sub(r"\^[^^]*\^", "", marked)
     for sec_n, sec in (_sections(unsup).items() if sections else [(None, unsup)]):
         for m in re.finditer(r"\b(\d+)(st|nd|rd|th)\b", sec):
             add(12, "Ordinal ending is not in superscript", m.group(0), f"{m.group(1)} with “{m.group(2)}” in superscript",
-                page=sec_n)
+                page=sec_n, fix=f"Set “{m.group(2)}” in “{m.group(0)}” as superscript.")
     # duplicated content is judged by the reviewer (rule 13): reused option lists, recaps and repeated
     # instructions are normal, so a word-for-word match alone is not a mistake
     out, keys = [], set()

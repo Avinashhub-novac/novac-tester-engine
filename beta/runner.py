@@ -639,7 +639,7 @@ class Run:
             self.col.add(i["group"], i["severity"], f"SB: {i['issue']}", slide_id=f"p{i['page']}",
                          slide_label=f"Page {i['page']}", detail=f"“{i['quote']}”" + (f"\n{i['detail']}" if i.get("detail") else ""), suggestion=i.get("suggestion", ""),
                          found_in=sbreview.FOUND_IN.get(i.get("found_in"), "SB-OST"), sb_says=i["quote"],
-                         sb_page=i["page"], rule=sbreview.RULES[i["rule"] - 1][1])
+                         sb_page=i["page"], rule=sbreview.RULES[i["rule"] - 1][1], fix=i.get("fix", ""))
         self.tasks["sb_review"] = {
             "pages_file": str(self.dir / "sb_pages.txt"), "formatting_file": str(self.dir / "sb_formatting.txt"),
             "page_pictures": str(self.dir / "sb"), "pages_with_pictures": with_images, "page_count": len(pages),
