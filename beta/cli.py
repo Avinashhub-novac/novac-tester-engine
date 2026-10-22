@@ -298,6 +298,23 @@ def _render(src, out, box, vw, tag="", mark=True, more=None):
         pad = 5 * k
         return [max(2, x - pad), max(2, y - pad), min(im.width - 3, x + w + pad), min(im.height - 3, y + h + pad)]
     boxes = [b for b in ([box] + list(more or [])) if b] if (mark and box) else []
+    # never outline an empty spot: the marked area must show something (text, a button, a picture) in this very
+    # screenshot – a flat, single-colour area means the object is not visible there (hidden, faded out, not drawn yet)
+    if boxes:
+        from PIL import ImageStat
+        gray = im.convert("L")
+
+        def drawn(bx):
+            x0_, y0_, x1_, y1_ = [int(v) for v in rect(bx)]
+            if x1_ - x0_ < 3 or y1_ - y0_ < 3:
+                return False
+            st = ImageStat.Stat(gray.crop((x0_, y0_, x1_, y1_)))
+            return st.stddev[0] >= 4.0
+        boxes = [b for b in boxes if drawn(b)]
+        if not boxes:
+            box, more = None, None   # outline the whole screen instead (the issue is about this screen)
+        elif box not in boxes:
+            box = boxes[0]
     if boxes:   # bright highlight under the outline, so the spot stands out at a glance
         glow = Image.new("RGBA", im.size, (0, 0, 0, 0))
         g = ImageDraw.Draw(glow)

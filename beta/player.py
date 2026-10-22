@@ -229,6 +229,21 @@ TEXTBOX_JS = r"""
     }
     return false;
   };
+  // what the learner sees: shown, not faded out (Storyline fades objects in from 0% and hides closed layers by
+  // opacity), not squashed to nothing, and drawn inside the slide
+  const shown = el => {
+    if (!el) return false;
+    let op = 1;
+    for (let p = el; p && p !== document.documentElement; p = p.parentElement) {
+      const ps = getComputedStyle(p);
+      if (ps.display === 'none' || ps.visibility === 'hidden') return false;
+      op *= parseFloat(ps.opacity || '1');
+      if (op < 0.1) return false;
+      const t = ps.transform;
+      if (t && t !== 'none') { const m = t.match(/matrix\(([^)]+)\)/); if (m) { const v = m[1].split(',').map(Number); if (Math.abs(v[0]) < 0.05 && Math.abs(v[3]) < 0.05) return false; } }
+    }
+    return true;
+  };
   const visualOf = el => {
     const id = (el.getAttribute('data-represents') || '').split('.').pop() || (el.id || '').replace(/^acc-/, '');
     return id ? document.querySelector('.slide-object[data-model-id="' + id + '"]') : null;
@@ -242,8 +257,7 @@ TEXTBOX_JS = r"""
     const el = node.parentElement; if (!el) continue;
     // the screen-reader copy is laid out differently from the text the learner sees: never use it for word positions
     if (el.closest('.acc-shadow-dom, .acc-shadow-el, [class*="acc-shadow"]')) continue;
-    const s = getComputedStyle(el);
-    if (s.visibility === 'hidden' || s.display === 'none' || parseFloat(s.opacity) < 0.05) continue;
+    if (!shown(el)) continue;
     range.selectNodeContents(node);
     const r = range.getBoundingClientRect();
     if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.right < 0 || r.top > innerHeight || r.left > innerWidth) continue;
@@ -275,7 +289,12 @@ TEXTBOX_JS = r"""
     const r = el.getBoundingClientRect();
     if (r.width < 4 || r.height < 4 || r.right < 0 || r.bottom < 0 || r.left > innerWidth || r.top > innerHeight) return;
     if (r.width > innerWidth * 0.98 && r.height > innerHeight * 0.9) return;   // the whole slide, not a text box
-    if (hiddenUnder(visualOf(el), r)) return;
+    // a screen-reader copy counts only when the object it stands for is really on screen now
+    const vis = visualOf(el);
+    if (!vis || !shown(vis)) return;
+    const vr = vis.getBoundingClientRect();
+    if (vr.width < 2 || vr.height < 2) return;
+    if (hiddenUnder(vis, r)) return;
     const k = t + '|' + Math.round(r.x) + ',' + Math.round(r.y);
     if (seenAcc.has(k)) return; seenAcc.add(k);
     out.push({ t: t.slice(0, 600), b: [r.x, r.y, r.width, r.height], acc: true });

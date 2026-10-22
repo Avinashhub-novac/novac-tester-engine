@@ -1212,7 +1212,11 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
         try:
             return page.evaluate("""(id) => { for (const el of document.querySelectorAll('[data-model-id="' + id + '"]')) {
                 const r = el.getBoundingClientRect(), s = getComputedStyle(el);
-                if (r.width > 2 && r.height > 2 && s.visibility !== 'hidden' && s.display !== 'none') return [r.x, r.y, r.width, r.height]; }
+                if (r.width <= 2 || r.height <= 2 || s.visibility === 'hidden' || s.display === 'none') continue;
+                let op = 1; for (let p = el; p && p !== document.body; p = p.parentElement) {
+                  const ps = getComputedStyle(p); if (ps.display === 'none' || ps.visibility === 'hidden') { op = 0; break; }
+                  op *= parseFloat(ps.opacity || '1'); }
+                if (op >= 0.1) return [r.x, r.y, r.width, r.height]; }   // a faded-out or hidden copy is not where the object is
                 return null; }""", model_id)
         except Exception:
             return None
