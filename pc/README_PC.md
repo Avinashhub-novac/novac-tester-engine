@@ -1,6 +1,6 @@
 # QC360 AI on your PC
 
-All the browser checks run on your PC, so there is no 700 MB upload and no long Claude session. Claude is used
+All the browser checks run on your PC, so there is no 700 MB upload and no long wait. AI is used
 only for the content review: spelling, grammar and the storyboard (SB).
 
 ## One-time set-up (about 30 minutes)
@@ -39,19 +39,19 @@ Reports are saved in `Documents\..\eQC360\reports\<course name>_<date>` (your us
 
 ## Content review – choose one
 
-**A. Automatic (Claude API key)**: the review runs by itself, in a few minutes.
-Ask the site owner for an Anthropic API key. Then, once, in a Command Prompt:
+**A. Automatic (review key)**: the review runs by itself, in a few minutes.
+Ask the site owner for the review key. Then, once, in a Command Prompt:
 
-    setx ANTHROPIC_API_KEY "sk-ant-…"
+    setx QC360_REVIEW_KEY "<the key from the site owner>"
 
 Close and reopen the window. Every test then finishes on its own.
 
-**B. In a Claude chat (no key needed)**: at the end of the browser checks the window says:
+**B. In the review chat (no key needed)**: at the end of the browser checks the window says:
 
-1. Open Claude (claude.ai) and start a new chat.
+1. Open the review chat (claude.ai) and start a new chat.
 2. Attach `REVIEW_REQUEST.md` from the report folder and type:
    *Follow the instructions in this file and give me the JSON as a downloadable answers.json file.*
-3. Save Claude's **answers.json** into the same report folder.
+3. Save the **answers.json** it gives you into the same report folder.
 4. Double-click **pc\finish.bat**. It finds the newest report waiting for its review.
 
 ## What you get

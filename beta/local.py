@@ -88,8 +88,8 @@ def cmd_setup(a):
     for t, got in have.items():
         print(f"  {t:<13} : {'found' if got else 'MISSING – needed for ' + NEEDS[t] + '   (install: ' + HOW[t] + ')'}")
         ok = ok and got
-    key = bool(os.environ.get("ANTHROPIC_API_KEY"))
-    print(f"  Claude API key: {'set – the content review runs by itself' if key else 'not set – the content review is done in a Claude chat (see README_PC)'}")
+    key = bool(_key())
+    print(f"  Review key: {'set – the content review runs by itself' if key else 'not set – the content review is finished in the review chat (see README_PC)'}")
     print(f"\n  Reports are saved in {REPORTS}")
     print("\nAll set." if ok else "\nInstall the missing tools above, close this window, open a new one and run setup again.")
     return 0
@@ -251,6 +251,11 @@ def _request(state):
     return text, pics, has_work
 
 
+def _key():
+    """The review key: QC360_REVIEW_KEY (or the older ANTHROPIC_API_KEY)."""
+    return os.environ.get("QC360_REVIEW_KEY") or os.environ.get("ANTHROPIC_API_KEY") or ""
+
+
 def _pictures_pdf(pics, path):
     """For a review in a Claude chat: every picture of the review on its own labelled page of one PDF."""
     if not pics:
@@ -296,7 +301,7 @@ def _api_review(text, pics):
                                                  "data": base64.b64encode(p.read_bytes()).decode()}}]
     body = {"model": model, "max_tokens": 32000, "messages": [{"role": "user", "content": content}],
             "system": "You are the content reviewer of an eLearning QA team. Reply with the JSON object only."}
-    headers = {"x-api-key": os.environ["ANTHROPIC_API_KEY"], "anthropic-version": "2023-06-01", "content-type": "application/json"}
+    headers = {"x-api-key": _key(), "anthropic-version": "2023-06-01", "content-type": "application/json"}
     last = None
     for attempt in range(3):
         try:
@@ -311,7 +316,7 @@ def _api_review(text, pics):
         except (requests.RequestException, ValueError) as e:
             last = str(e)[:200]
             time.sleep(10)
-    raise RuntimeError(f"The Claude API review did not work ({last}).")
+    raise RuntimeError(f"The automatic review did not work ({last}).")
 
 
 def _review(out, state):
@@ -320,26 +325,26 @@ def _review(out, state):
     if not has_work:
         ans.write_text(json.dumps({k: [] for k in KEYS}))
         return _finish(out, state)
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        print("Content review by Claude (API)…")
+    if _key():
+        print("Content review (automatic)…")
         try:
             answers, model = _api_review(text, pics)
             ans.write_text(json.dumps(answers, ensure_ascii=False, indent=1))
-            state["reviewer"] = f"Claude API ({model})"
+            state["reviewer"] = "AI review (automatic)"
             (out / "state.json").write_text(json.dumps(state, indent=1))
             return _finish(out, state)
         except Exception as e:
-            print(f"  {e} – falling back to a review in a Claude chat.")
+            print(f"  {e} – finish the review in the review chat instead.")
     req = out / "REVIEW_REQUEST.md"
     req.write_text(text)
     pdf = _pictures_pdf(pics, out / "REVIEW_PICTURES.pdf")
     also = f"\n     and also attach:  {pdf}  (the pictures the review looks at)" if pdf else ""
     print(f"""
 Content review – one step for you:
-  1. Open Claude (claude.ai) and start a new chat.
+  1. Open the review chat (claude.ai) and start a new chat.
   2. Attach this file:  {req}{also}
      and type:  Follow the instructions in this file and give me the JSON as a downloadable answers.json file.
-  3. Save Claude's answers.json into the same folder:  {out}
+  3. Save the answers.json it gives you into the same folder:  {out}
   4. Run:  python -m beta.local finish "{out}"
      (or double-click finish.bat and drop the folder on it)
 """)
@@ -367,14 +372,14 @@ def cmd_finish(a):
     if not ans.exists():
         cands = sorted(out.glob("answers*.json")) + sorted(out.glob("*.json.txt"))
         if not cands:
-            raise SystemExit(f"Save Claude's reply as answers.json in {out} first.")
+            raise SystemExit(f"Save the review reply as answers.json in {out} first.")
         ans = cands[0]
     try:
         clean = _extract_json(ans.read_text(encoding="utf-8", errors="replace"))
     except Exception as e:
-        raise SystemExit(f"answers.json could not be read ({e}). Save Claude's JSON reply exactly as it gave it.")
+        raise SystemExit(f"answers.json could not be read ({e}). Save the JSON reply exactly as it was given.")
     (out / "answers.json").write_text(json.dumps(clean, ensure_ascii=False, indent=1))
-    state.setdefault("reviewer", "Claude chat")
+    state.setdefault("reviewer", "AI review (chat)")
     sf.write_text(json.dumps(state, indent=1))
     return _finish(out, state)
 
