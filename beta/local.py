@@ -106,6 +106,8 @@ def _options(stage, kind, a):
         o["expect"] = {"menu": a.menu, "seekbar": a.seekbar, "next": a.next}
     if stage == "gold":
         o = {"stage": "gold", "play_full": True, "swipe": False, "buttons": False, "transcript": False}
+        if kind == "scorm":
+            o["expect"] = {"menu": a.menu, "seekbar": a.seekbar, "next": a.next}
     if kind == "sb":
         o = {"stage": "sb", "english": a.english, "requirements": (a.requirements or "")[:2000]}
     return o
@@ -403,9 +405,9 @@ def main(argv=None):
     t.add_argument("--captions", help="captions file for a video (.srt / .vtt)")
     t.add_argument("--stage", default="beta", choices=["beta", "alpha", "gold", "sb"])
     t.add_argument("--english", default="us", choices=["us", "uk"])
-    t.add_argument("--menu", default="restricted", choices=["restricted", "free"])
-    t.add_argument("--next", default="restricted", choices=["restricted", "free"])
-    t.add_argument("--seekbar", default="restricted", choices=["restricted", "free"])
+    t.add_argument("--menu", default="restricted", choices=["restricted", "free", "skip"])
+    t.add_argument("--next", default="restricted", choices=["restricted", "free", "skip"])
+    t.add_argument("--seekbar", default="restricted", choices=["restricted", "free", "skip"])
     t.add_argument("--no-swipe", action="store_true", help="skip the phone swipe checks")
     t.add_argument("--quick", action="store_true", help="do not play every screen to its end")
     t.add_argument("--glossary", default="", help="words that are always right, separated by commas")

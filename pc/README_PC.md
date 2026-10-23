@@ -29,7 +29,8 @@ Keep Google Chrome on the same version for every test, so every report is made t
 
 ## Test a course
 
-1. In Explorer, select the course zip and its storyboard together.
+1. In Explorer, select the course zip and its storyboard together. For SB and Alpha you can also add a style guide
+   (image, Word or PDF): put **style** in its file name, e.g. `Client_Style_Guide.pdf`.
 2. Drag them onto **pc\test.bat**.
 3. Type the stage (`beta`, `alpha`, `gold` or `sb`) or press Enter for Beta.
 
@@ -66,6 +67,8 @@ Close and reopen the window. Every test then finishes on its own.
     python -m beta.local setup                                  check this PC
     python -m beta.local test course.zip SB.pptx --stage alpha  test with options
     python -m beta.local test course.zip --menu free --next free --seekbar free   (SOW: navigation not restricted)
+    python -m beta.local test course.zip --next skip              do not check the Next restriction (also menu / seekbar)
+    python -m beta.local test course.zip SB.pptx --stage sb --styleguide guide.pdf   test the SB against a style guide
     python -m beta.local test course.zip --no-swipe             skip the phone checks
     python -m beta.local finish "C:\Users\…\eQC360\reports\…"   finish a given report
 
