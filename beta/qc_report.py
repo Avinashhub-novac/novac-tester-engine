@@ -76,6 +76,10 @@ def category(f):
 
 def issue_found_in(f):
     c, msg = f["check"], f["message"].lower()
+    if c == "style_guide":   # where the words are: SB VO / OST, or the course's on-screen text
+        if f.get("sb_only"):
+            return "SB-Audio Script" if re.search(r"\bvo\b|voice|audio|narrat", msg) else "SB-OST"
+        return "Slide Title" if "title" in msg else "OST"
     if c.startswith("sb_"):
         return f.get("found_in") if f.get("found_in") in ISSUE_LIST else "SB-OST"
     if c in ("content", "restrictions", "interactivity", "assessment") and f.get("found_in") in ISSUE_LIST:
@@ -99,7 +103,7 @@ def feedback_text(f):
     """The Feedback description, in the team's format:
     Issue Found in / What is given / What needs to be done / Provided in SB / Provided in Output."""
     from .wording import default_fix
-    if f.get("check", "").startswith("sb_"):
+    if f.get("check", "").startswith("sb_") or (f.get("check") == "style_guide" and f.get("sb_only")):
         return sb_feedback(f)
     msg = f.get("message", "")
     if msg.startswith("SB: "):

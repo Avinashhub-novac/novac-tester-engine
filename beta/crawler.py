@@ -2744,6 +2744,14 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                     continue   # pressing NEXT already opened the next screen
             if not self.advance(page, sid):
                 break
+        # Next "restricted" also means: once a screen is finished, coming back to it the learner can go on at once
+        if exp.get("next") == "restricted" and next_seen and not any(x["usable"] for x in next_seen):
+            try:
+                obs["next_revisit"] = self._revisit_next(page, [x["sid"] for x in next_seen])
+            except Stopped:
+                raise
+            except Exception as e:
+                self.log(f"Revisit check skipped: {e}"[:160])
         if "next" in exp:
             early = [x for x in next_seen if x["usable"]]
             obs["next"] = ({"found": "free", **early[0], "note": f"Next could be used as soon as {self.label(early[0]['sid'])} opened, before it finished."}
@@ -2754,8 +2762,42 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             obs["seekbar"] = ({"found": "free", **jumped[0], "note": f"Dragging the seekbar ahead on {self.label(jumped[0]['sid'])} skipped the slide forward."}
                               if jumped else {"found": "restricted", "note": f"Dragging the seekbar ahead did not skip forward on {len(seek_seen)} slide{'s' if len(seek_seen) != 1 else ''} tested."}
                               if seek_seen else {"found": "restricted", "note": "No seekbar is shown, so the learner cannot seek."})
-        self.restrictions = {k: {"expected": exp[k], **v} for k, v in obs.items()}
+        self.restrictions = {k: {"expected": exp.get(k, "free"), **v} for k, v in obs.items() if v}
         ctx.close()
+
+    def _revisit_next(self, page, finished):
+        """Goes back one screen to a screen already finished and checks Next can be used straight away."""
+        cur = self.identify(self.state(page))
+        st = self.state(page)
+        b0 = self._sig(st)
+        if st["prevExists"] and not st["prevDisabled"]:
+            self.click_first(page, SEL["prev"])
+        else:
+            back = self.slide_nav(page, self.course.by_id(cur), "back")
+            if not back:
+                return None
+            self.click_box(page, back["box"])
+        s2 = self.settle(page, 300)
+        got = self.identify(s2, expected=None)
+        if not self._moved(b0, self._sig(s2)) or got == cur or got not in finished:
+            return None
+        page.wait_for_timeout(800)   # the screen has just opened again: its narration is far from finished
+        st = self.state(page)
+        shot = self.shot(page, f"{got}_revisit_next")
+        if st["nextExists"]:
+            usable, box = not st["nextDisabled"], st.get("nextBox")
+        else:
+            nav = self.slide_nav(page, self.course.by_id(got), "forward")
+            if not nav:
+                return None
+            box = nav["box"]
+            b1 = self._sig(self.state(page))
+            self.click_box(page, box)
+            s3 = self.settle(page)
+            usable = self._moved(b1, self._sig(s3)) and self.identify(s3) != got
+        return {"found": "free" if usable else "restricted", "sid": got, "shot": shot, "box": box,
+                "note": f"Came back to {self.label(got)} after finishing it: Next "
+                        + ("could be used at once." if usable else "was locked again until the screen played to the end.")}
 
     # ------------------------------------------------------------ main
     def run(self, passes=("desktop", "prev", "menu", "buttons", "mobile")):

@@ -30,7 +30,9 @@ WORK = HOME / "work"
 REPORTS = HOME / "reports"
 RULES = Path(__file__).with_name("review_rules.md")
 DOC_EXT = {".doc", ".docx", ".ppt", ".pptx", ".pdf"}
-KEYS = ("proofread", "script_compare", "transcript_review", "sb_compare", "sb_review", "logic_check", "assessment_review")
+IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+KEYS = ("proofread", "script_compare", "transcript_review", "sb_compare", "sb_review", "logic_check", "assessment_review",
+        "style_guide")
 
 
 # ------------------------------------------------------------------------------------------------ set-up
@@ -133,8 +135,13 @@ def cmd_test(a):
     for x in files:
         if not x.exists():
             raise SystemExit(f"File not found: {x}")
+    # a file with "style" in its name is the style guide (Word, PDF, PowerPoint or a picture)
+    guides = [x for x in files if re.search(r"style", x.stem, re.I) and x.suffix.lower() in DOC_EXT | IMG_EXT]
+    if guides and not a.styleguide:
+        a.styleguide = str(guides[0])
+    files = [x for x in files if x not in guides]
     docs = [x for x in files if x.suffix.lower() in DOC_EXT]
-    others = [x for x in files if x.suffix.lower() not in DOC_EXT]
+    others = [x for x in files if x.suffix.lower() not in DOC_EXT | IMG_EXT]
     if a.stage == "sb":
         if not docs:
             raise SystemExit("The SB stage takes a storyboard (.doc, .docx, .ppt, .pptx).")
@@ -176,6 +183,8 @@ def cmd_test(a):
             "--options", json.dumps(opts), "--glossary", a.glossary or ""]
     if sb:
         args += ["--sb", str(sb)]
+    if a.styleguide:
+        args += ["--styleguide", str(Path(a.styleguide).expanduser().resolve())]
     if a.captions:
         args += ["--captions", str(Path(a.captions).expanduser().resolve())]
     t0 = time.time()
@@ -213,7 +222,16 @@ def _request(state):
         if sbr.get(key) and Path(sbr[key]).exists():
             files[title] = Path(sbr[key]).read_text(errors="replace")
             sbr.pop(key, None)
+    sg = tasks.get("style_guide") or {}
+    if sg.get("text_file") and Path(sg["text_file"]).exists():
+        files["STYLE GUIDE"] = Path(sg["text_file"]).read_text(errors="replace")
+        sg.pop("text_file", None)
     pics = []
+    for n in (sg.get("pictures") or [])[:15]:
+        p = Path(sg.get("pictures_dir", "")) / n
+        if p.exists():
+            pics.append((f"style guide picture {n}", p))
+    sg.pop("pictures_dir", None)
     if sbr.get("page_pictures"):
         for k in (sbr.get("pages_with_pictures") or [])[:60]:
             p = Path(sbr["page_pictures"]) / f"page{k}.png"
@@ -245,7 +263,7 @@ def _api_review(text, pics):
     content = [{"type": "text", "text": text}]
     import base64
     for k, p in pics:
-        content += [{"type": "text", "text": f"Picture of SB page {k}:"},
+        content += [{"type": "text", "text": (f"Picture of SB page {k}:" if isinstance(k, int) else f"Picture: {k}")},
                     {"type": "image", "source": {"type": "base64", "media_type": "image/png",
                                                  "data": base64.b64encode(p.read_bytes()).decode()}}]
     body = {"model": model, "max_tokens": 32000, "messages": [{"role": "user", "content": content}],
@@ -381,6 +399,7 @@ def main(argv=None):
     t = sub.add_parser("test")
     t.add_argument("files", nargs="+", help="SCORM zip or video, and optionally its storyboard (or, with --stage sb, a storyboard)")
     t.add_argument("--sb", help="storyboard (Word / PowerPoint / PDF)")
+    t.add_argument("--styleguide", help="style guide for SB / Alpha (Word, PDF, PowerPoint or a picture)")
     t.add_argument("--captions", help="captions file for a video (.srt / .vtt)")
     t.add_argument("--stage", default="beta", choices=["beta", "alpha", "gold", "sb"])
     t.add_argument("--english", default="us", choices=["us", "uk"])

@@ -25,6 +25,7 @@ CHECKS = [
     ("sb_alignment", "SB: OST, VO, titles & images"),
     ("sb_standards", "SB: Standards & style"),
     ("sb_logic", "SB: Logic & facts"),
+    ("style_guide", "Style guide"),
 ]
 CHECK_NAMES = dict(CHECKS)
 SEVERITIES = ("error", "warning", "info")

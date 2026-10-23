@@ -74,6 +74,7 @@ class Run:
         self.meta.update(status="running", started=time.time())
         self.save_meta()
         try:
+            self.style_guide_task()
             if self.meta["kind"] == "scorm":
                 self.run_scorm()
             elif self.meta["kind"] == "sb":
@@ -87,6 +88,49 @@ class Run:
             self.save_meta()
         finally:
             self.logf.close()
+
+    def style_guide_task(self):
+        """SB and Alpha: the team's style guide (Word, PDF, PowerPoint or a picture) for the reviewer to test against."""
+        sg = self.meta.get("styleguide")
+        stage = (self.meta.get("options") or {}).get("stage", "beta")
+        if not sg or stage not in ("sb", "alpha"):
+            if sg:
+                self.log("Style guide not used: it applies to the SB and Alpha stages only")
+            return
+        path = self.dir / sg
+        out = self.dir / "styleguide"
+        out.mkdir(exist_ok=True)
+        text, pics = "", []
+        ext = path.suffix.lower()
+        from . import storyboard
+        try:
+            if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
+                from PIL import Image
+                im = Image.open(path).convert("RGB")
+                if im.width > 2000:
+                    im = im.resize((2000, round(im.height * 2000 / im.width)))
+                im.save(out / "sg1.png")
+                pics = ["sg1.png"]
+            else:
+                try:
+                    text = storyboard.read_text(path)
+                except Exception as e:
+                    self.log(f"Style guide text could not be read: {e}"[:160])
+                pdf = path if ext == ".pdf" else storyboard._convert(path, "pdf")
+                import subprocess
+                subprocess.run(["pdftoppm", "-r", "80", "-png", "-l", "15", str(pdf), str(out / "sg")],
+                               capture_output=True, timeout=300)
+                pics = sorted(p.name for p in out.glob("sg*.png"))
+        except Exception as e:
+            self.log(f"Style guide could not be prepared: {e}"[:200])
+        if not text.strip() and not pics:
+            self.col.add("style_guide", "warning", "The style guide could not be read", detail=f"File: {sg}")
+            return
+        (out / "styleguide.txt").write_text(text)
+        self.col.ran("style_guide")
+        self.tasks["style_guide"] = {"text_file": str(out / "styleguide.txt"), "chars": len(text),
+                                     "pictures_dir": str(out), "pictures": pics, "applies_to": "sb" if stage == "sb" else "course"}
+        self.log(f"Style guide ready: {len(text)} characters of text, {len(pics)} page picture{'s' if len(pics) != 1 else ''}")
 
     # --------------------------------------------------- shared text checks
     def proofread(self, items, label_of):
@@ -148,10 +192,11 @@ class Run:
         stage = opts.get("stage", "beta")
         gold = stage == "gold"
         passes = [p for p in ("desktop", "restrict", "prev", "menu", "buttons", "assessment", "mobile") if opts.get(p, True)]
-        if stage != "beta" or not any(v in ("restricted", "free") for v in (opts.get("expect") or {}).values()):
+        wants_restrict = stage in ("beta", "gold") and any(v in ("restricted", "free") for v in (opts.get("expect") or {}).values())
+        if not wants_restrict:
             passes.remove("restrict")
-        if gold:   # Gold / Showstopper: functionality only (navigation and the assessment)
-            passes = ["desktop", "prev", "assessment"]
+        if gold:   # Gold / Showstopper: functionality only (navigation, the assessment, restrictions as per SOW)
+            passes = ["desktop", "prev", "assessment"] + (["restrict"] if wants_restrict else [])
         from .quiz import assessment_parts as _ap
         if not any(s.is_quiz for s in course.slides) and not _ap(course)[1]:
             passes = [p for p in passes if p != "assessment"]
@@ -196,13 +241,15 @@ class Run:
             reach = set(crawler.order)
             course.slides = [x for x in course.slides if x.id in reach]
         if gold:
-            for c in ("menu", "buttons", "swipe", "seekbar", "screen_number", "transcript", "content", "restrictions", "completion"):
-                self.col.skip(c, "Gold / Showstopper: only major language errors, navigation and the assessment are checked")
+            for c in ("menu", "buttons", "swipe", "seekbar", "screen_number", "transcript", "content", "completion"):
+                self.col.skip(c, "Gold / Showstopper: only major language errors, navigation, the assessment and restrictions are checked")
+            self.restriction_issues(course, crawler, passes, opts)
             self.assessment_check(course, crawler, visits)
             self.gold_language(course, visits)
             slides = self.slide_list(course, visits, crawler)
             self.finish(slides, {"course_title": course.title, "slide_count": len(course.slides),
                                  "completion": crawler.completion, "shot_boxes": self.shot_boxes, "stage": "gold",
+                                 "restrictions": crawler.restrictions,
                                  **tables})
             return
         if "mobile" not in passes:
@@ -211,24 +258,8 @@ class Run:
         if "buttons" not in passes:
             self.col.skip("buttons", "Buttons pass turned off for this run")
 
-        # ---- restrictions (Beta): compare what the course does with what the SOW says
-        names = {"menu": "Menu", "seekbar": "Seekbar", "next": "Next button"}
-        where = {"menu": "Menu", "seekbar": "Seek Bar", "next": "Navigation"}
-        if "restrict" in passes:
-            self.col.ran("restrictions")
-            for k, o in crawler.restrictions.items():
-                if o.get("found") is None:
-                    continue
-                if o["found"] != o["expected"]:
-                    want = "restricted" if o["expected"] == "restricted" else "free (not restricted)"
-                    self.col.add("restrictions", "error",
-                                 f"{names[k]} is {'not restricted' if o['found'] == 'free' else 'restricted'}, but it should be {want} as per SOW",
-                                 slide_id=o.get("sid", ""), slide_label=self.label_of(course, o.get("sid", "")),
-                                 detail=o.get("note", ""), screenshot=o.get("shot", ""), box=o.get("box"), vw=1366,
-                                 found_in=where[k])
-        else:
-            self.col.skip("restrictions", "Alpha review: restrictions are not checked" if opts.get("stage") == "alpha"
-                          else "No restrictions selected for this test")
+        # ---- restrictions (Beta, Gold): compare what the course does with what the SOW says
+        self.restriction_issues(course, crawler, passes, opts)
 
         # ---- completion reported to the LMS
         comp = crawler.completion
@@ -534,6 +565,25 @@ class Run:
                 self.col.add("transcript", "warning", "Slide has narration but no closed captions were found",
                              slide_id=s.id, slide_label=s.label, screenshot=v.get("shot", ""))
             # captions, transcript and CC are one and the same: they are never compared with each other
+
+    def restriction_issues(self, course, crawler, passes, opts):
+        names = {"menu": "Menu", "seekbar": "Seekbar", "next": "Next button"}
+        where = {"menu": "Menu", "seekbar": "Seek Bar", "next": "Navigation", "next_revisit": "Navigation"}
+        if "restrict" not in passes:
+            self.col.skip("restrictions", "Alpha review: restrictions are not checked" if opts.get("stage") == "alpha"
+                          else "No restrictions selected for this test (all set to Skip)")
+            return
+        self.col.ran("restrictions")
+        for k, o in (crawler.restrictions or {}).items():
+            if not o or o.get("found") is None or o["found"] == o["expected"]:
+                continue
+            if k == "next_revisit":
+                msg = "Next is locked again when the learner comes back to a screen already finished (should be enabled as per SOW)"
+            else:
+                want = "restricted" if o["expected"] == "restricted" else "free (not restricted)"
+                msg = f"{names[k]} is {'not restricted' if o['found'] == 'free' else 'restricted'}, but it should be {want} as per SOW"
+            self.col.add("restrictions", "error", msg, slide_id=o.get("sid", ""), slide_label=self.label_of(course, o.get("sid", "")),
+                         detail=o.get("note", ""), screenshot=o.get("shot", ""), box=o.get("box"), vw=1366, found_in=where[k])
 
     @staticmethod
     def label_of(course, sid):

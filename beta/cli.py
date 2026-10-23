@@ -58,11 +58,16 @@ def cmd_run(a):
     if a.captions:
         cap = "captions" + Path(a.captions).suffix.lower()
         shutil.copy(a.captions, run_dir / cap)
+    sg = ""
+    if getattr(a, "styleguide", None):
+        sg = "styleguide_src" + Path(a.styleguide).suffix.lower()
+        shutil.copy(a.styleguide, run_dir / sg)
     sb = ""
     if a.sb:
         sb = "storyboard" + Path(a.sb).suffix.lower()
         shutil.copy(a.sb, run_dir / sb)
     meta = {"id": a.id, "kind": a.kind, "name": a.name or up.name, "file": up.name, "captions": cap, "storyboard": sb,
+            "styleguide": sg,
             "created": time.time(), "status": "queued", "glossary": a.glossary or "",
             "options": json.loads(a.options or "{}")}
     (run_dir / "run.json").write_text(json.dumps(meta, indent=1))
@@ -87,7 +92,16 @@ def _paths(a):
 
 def _save(run_dir, res):
     from beta.runner import summarize
+    from beta import scope
+    try:
+        meta = json.loads((run_dir / "run.json").read_text())
+    except Exception:
+        meta = {}
+    stage = res.get("stage") or (meta.get("options") or {}).get("stage") or "beta"
+    kind = meta.get("kind", "")
+    scope.apply(res, stage, kind)   # nothing outside the stage's scope is ever reported
     res["summary"] = summarize(res["findings"], set(res.get("checks_run", [])), res.get("checks_skipped", {}))
+    scope.apply(res, stage, kind)   # the checklist for the result page, from the final summary
     (run_dir / "results.json").write_text(json.dumps(res, indent=1, ensure_ascii=False))
 
 
@@ -188,6 +202,24 @@ def cmd_merge(a):
             rule=rules.get(rule, ""), found_in=FOUND_IN.get(v.get("found_in"), v.get("found_in") or "SB-OST"),
             sb_screen=str(v.get("screen") or ""), screen_title=v.get("screen_title", ""), sb_only=True, assigned_to="ID",
             fix=v.get("suggestion", ""))
+    for v in ans.get("style_guide", []):   # issues against the team's style guide (SB and Alpha)
+        page = int(v.get("page") or 0) or None
+        sid = v.get("slide_id") or (f"p{page}" if page else "")
+        q = str(v.get("quote") or "")
+        rule = str(v.get("guide_rule") or "").strip()
+        details = [f"“{q}”"] if q else []
+        if v.get("explanation"):
+            details.append(v["explanation"])
+        if rule:
+            details.append(f"Style guide: {rule}")
+        sb_stage = (tasks.get("style_guide") or {}).get("applies_to") == "sb"
+        add(check="style_guide", severity=v.get("severity") if v.get("severity") in ("error", "warning") else "warning",
+            message=(f"SB: {v.get('issue', 'Not as per the style guide')}" if sb_stage else v.get("issue", "Not as per the style guide")),
+            slide_id=sid, slide_label=(f"Page {page}" if sb_stage and page else slide_label(sid)), detail="\n".join(details),
+            suggestion=v.get("suggestion", ""), fix=v.get("suggestion", ""), course_says=q, locate=q[:80],
+            sb_says=q if sb_stage else "", sb_page=page or 0, sb_only=sb_stage, assigned_to="ID" if sb_stage else "",
+            found_in="Style guide", rule=rule,
+            screenshot="" if sb_stage else next((x.get("shot", "") for x in res.get("slides", []) if x.get("id") == sid), ""))
     for v in ans.get("transcript_review", []):
         it = item("transcript_review", v.get("item_id")) or {}
         if v.get("verdict") in ("mismatch", "minor_differences"):
@@ -761,6 +793,69 @@ def cmd_finalize(a):
                      indent=1))
 
 
+CKPT_SKIP_DIRS = {"content", "bundle", "bundle_xl", "xl_thumbs", "parts", "__pycache__"}
+
+
+def cmd_checkpoint_save(a):
+    """Packs the finished work of a run (browser checks, tasks, answers so far, pictures) so a later session can
+    continue from here. Screenshots are stored as compact JPEGs (same names). Prints the base64 part files."""
+    import base64
+    import io
+    import zipfile
+    from PIL import Image
+    run_dir = Path(a.work).resolve() / "runs" / a.id
+    meta = json.loads((run_dir / "run.json").read_text())
+    skip_files = {meta.get("file", ""), "QC_Review.xlsx"}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in sorted(run_dir.rglob("*")):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(run_dir)
+            if rel.parts[0] in CKPT_SKIP_DIRS or p.name in skip_files or p.name.startswith(("report_part", "ckpt_part", "QC_Review_")):
+                continue
+            if rel.parts[0] == "shots" and p.suffix.lower() == ".png":
+                try:   # same file name, JPEG inside: the pictures are only read with PIL, which goes by content
+                    im = Image.open(p).convert("RGB")
+                    b = io.BytesIO()
+                    im.save(b, "JPEG", quality=82)
+                    z.writestr(rel.as_posix(), b.getvalue())
+                    continue
+                except Exception:
+                    pass
+            if p.stat().st_size > 60 * 1024 * 1024:
+                continue   # never the course or storyboard itself
+            z.write(p, rel.as_posix())
+    data = buf.getvalue()
+    for old in run_dir.glob("ckpt_part*.txt"):
+        old.unlink()
+    parts = []
+    for i in range(0, max(len(data), 1), 14 * 1024 * 1024):
+        pp = run_dir / f"ckpt_part{len(parts) + 1}.txt"
+        pp.write_text(base64.b64encode(data[i:i + 14 * 1024 * 1024]).decode())
+        parts.append(str(pp))
+    print(json.dumps({"size": len(data), "parts": parts}, indent=1))
+
+
+def cmd_checkpoint_restore(a):
+    """Unpacks a checkpoint (its base64 part files, in order) into the run folder."""
+    import base64
+    import io
+    import zipfile
+    run_dir = Path(a.work).resolve() / "runs" / a.id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    data = b"".join(base64.b64decode(Path(p).read_text()) for p in a.parts)
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        for n in z.namelist():
+            if n.startswith("/") or ".." in Path(n).parts:
+                continue
+            z.extract(n, run_dir)
+    tasks = run_dir / "claude_tasks.json"
+    partial = run_dir / "answers_partial.json"
+    print(json.dumps({"restored": True, "files": len(list(run_dir.rglob("*"))), "claude_tasks": str(tasks) if tasks.exists() else None,
+                      "answers_partial": str(partial) if partial.exists() else None}, indent=1))
+
+
 def _phase(a, name):
     try:
         from beta.progress import Progress
@@ -809,7 +904,7 @@ def main(argv=None):
     r = sub.add_parser("run")
     for k in ("--work", "--id", "--upload", "--kind"):
         r.add_argument(k, required=True)
-    for k in ("--captions", "--options", "--glossary", "--name", "--sb"):
+    for k in ("--captions", "--options", "--glossary", "--name", "--sb", "--styleguide"):
         r.add_argument(k)
     for name, extra in (("merge", "--answers"), ("bundle", None), ("report", None), ("finalize", "--map")):
         q = sub.add_parser(name)
@@ -823,8 +918,17 @@ def main(argv=None):
     q.add_argument("--step", choices=["prepare", "review", "report", "upload", "done"])
     q = sub.add_parser("check-env")
     q.add_argument("--manifest")
+    q = sub.add_parser("checkpoint-save")
+    q.add_argument("--work", required=True)
+    q.add_argument("--id", required=True)
+    q = sub.add_parser("checkpoint-restore")
+    q.add_argument("--work", required=True)
+    q.add_argument("--id", required=True)
+    q.add_argument("--parts", nargs="+", required=True)
     a = p.parse_args(argv)
-    return {"run": cmd_run, "progress": cmd_progress, "check-env": cmd_check_env, "merge": cmd_merge, "bundle": cmd_bundle, "report": cmd_report, "finalize": cmd_finalize}[a.cmd](a) or 0
+    return {"run": cmd_run, "progress": cmd_progress, "check-env": cmd_check_env, "merge": cmd_merge, "bundle": cmd_bundle,
+            "report": cmd_report, "finalize": cmd_finalize, "checkpoint-save": cmd_checkpoint_save,
+            "checkpoint-restore": cmd_checkpoint_restore}[a.cmd](a) or 0
 
 
 if __name__ == "__main__":
