@@ -14,14 +14,14 @@ import re
 import subprocess
 from pathlib import Path
 
-RELEASE = "1.6.1"
+RELEASE = "1.6.2"
 MODEL = "claude-opus-5-5"
 
 # Exact versions the release was built and tested with.
 FROZEN_TOOLS = {
     "python": "3.13",
-    "chromium": "141.0.7390.37",
-    "playwright": "1.56.0",
+    "chromium": "153.0.8010.12",
+    "playwright": "1.63.0",
     "ffmpeg": "6.1.1",
     "libreoffice": "24.2.7.2",
     "poppler": "24.02.0",
