@@ -1,4 +1,4 @@
-# eQC360 AI on your PC
+# QC360 AI on your PC
 
 All the browser checks run on your PC, so there is no 700 MB upload and no long Claude session. Claude is used
 only for the content review: spelling, grammar and the storyboard (SB).
@@ -58,7 +58,7 @@ Close and reopen the window. Every test then finishes on its own.
 
 - **QC_Review_<course>.xlsx** – the team's QC report: issues with screenshots, Navigation Test, Assessment Test and
   LMS Completion.
-- **SITE_IMPORT_<course>.zip** – to share the result, open the **eQC360 AI PC** website
+- **SITE_IMPORT_<course>.zip** – to share the result, open the **QC360 AI PC** website
   (https://claude.ai/artifact/7frJK7iGTRTxEC4AeGbq6N), choose **Import PC report**, and pick this zip. The whole team then sees the report there, with
   its screenshots.
 

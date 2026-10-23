@@ -1,5 +1,5 @@
 @echo off
-title eQC360 AI - test
+title QC360 AI - test
 cd /d "%~dp0.."
 if "%~1"=="" (
   echo.

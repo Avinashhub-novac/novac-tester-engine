@@ -1,8 +1,8 @@
 @echo off
-title eQC360 AI - set up this PC
+title QC360 AI - set up this PC
 cd /d "%~dp0.."
 echo.
-echo  eQC360 AI - one-time set-up of this PC
+echo  QC360 AI - one-time set-up of this PC
 echo  ======================================
 echo.
 where python >nul 2>nul

@@ -1,4 +1,4 @@
-"""eQC360 AI on your own PC: every browser check runs here, offline; Claude is used only for the content review.
+"""QC360 AI on your own PC: every browser check runs here, offline; Claude is used only for the content review.
 
     python -m beta.local setup                         check that the tools are installed
     python -m beta.local test COURSE.zip [--sb SB.pptx] [--stage beta|alpha|gold|sb] [--captions FILE]
@@ -9,7 +9,7 @@ Content review:
   * without one, the tester writes REVIEW_REQUEST.md into the report folder: attach it in a Claude chat
     (claude.ai), save Claude's reply as answers.json in the same folder, then run `finish`.
 
-Every report folder gets the QC Review Excel workbook and SITE_IMPORT_<name>.zip, which the eQC360 AI website
+Every report folder gets the QC Review Excel workbook and SITE_IMPORT_<name>.zip, which the QC360 AI website
 imports with "Import PC report" so the whole team sees the result.
 """
 import argparse
@@ -82,7 +82,7 @@ def cmd_setup(a):
     have = _tools()
     from beta import release
     name, ver = release.browser()
-    print(f"eQC360 AI {release.RELEASE} – checking this PC\n")
+    print(f"QC360 AI {release.RELEASE} – checking this PC\n")
     print(f"  Browser       : {'Google Chrome' if name == 'chrome' else 'Chromium (Google Chrome not found)'} {ver}")
     ok = True
     for t, got in have.items():
@@ -175,7 +175,7 @@ def cmd_test(a):
     (out / "state.json").write_text(json.dumps(state, indent=1))
     from beta import release
     bname, bver = release.browser()
-    print(f"eQC360 AI {release.RELEASE} on this PC – testing {up.name} ({a.stage.upper()})")
+    print(f"QC360 AI {release.RELEASE} on this PC – testing {up.name} ({a.stage.upper()})")
     print(f"Browser: {'Google Chrome' if bname == 'chrome' else 'Chromium'} {bver}.  Report folder: {out}\n")
     run_dir = WORK / "runs" / run_id
     stop = threading.Event()
@@ -333,7 +333,7 @@ def cmd_finish(a):
         out = waiting[-1].parent
     sf = out / "state.json"
     if not sf.exists():
-        raise SystemExit(f"{out} is not an eQC360 report folder (no state.json).")
+        raise SystemExit(f"{out} is not a QC360 AI report folder (no state.json).")
     state = json.loads(sf.read_text())
     ans = out / "answers.json"
     if not ans.exists():
@@ -395,7 +395,7 @@ Done: {totals['errors']} errors, {totals['warnings']} warnings.
 
 def main(argv=None):
     _utf8()
-    p = argparse.ArgumentParser(prog="python -m beta.local", description="eQC360 AI on this PC")
+    p = argparse.ArgumentParser(prog="python -m beta.local", description="QC360 AI on this PC")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("setup")
     t = sub.add_parser("test")

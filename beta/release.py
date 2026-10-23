@@ -1,4 +1,4 @@
-"""Frozen release of eQC360 AI.
+"""Frozen release of QC360 AI.
 
 Every run must give the same result for the same input. That needs three things to stay fixed:
   1. the checks (this engine)            -> RELEASE + checksums of every engine file (manifest.json)
@@ -14,7 +14,7 @@ import re
 import subprocess
 from pathlib import Path
 
-RELEASE = "1.6.2"
+RELEASE = "1.6.3"
 MODEL = "claude-opus-5-5"
 
 # Exact versions the release was built and tested with.

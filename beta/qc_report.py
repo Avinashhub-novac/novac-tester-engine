@@ -20,7 +20,7 @@ from copy import copy
 
 from .qc_template import TEMPLATE_B64
 
-REVIEWER = "eQC360 AI"
+REVIEWER = "QC360 AI"
 STATUS = "In-progress"
 ISSUE_LIST = ["Transcript", "Audio", "OST", "Animation", "ARD", "Graphic", "Header", "Buttons", "Menu", "Objectives",
               "Assessment", "Assessment Strategy", "Resource", "Seek Bar", "Slide Title", "Skin", "Video", "Navigation",
