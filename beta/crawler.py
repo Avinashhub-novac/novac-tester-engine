@@ -11,7 +11,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 from .player import (SEL, PLAYER_BUTTONS, VISITED_CLASSES, CURRENT_CLASSES, INIT_SCRIPT,
-                     STATE_JS, FINGERPRINT_JS, CLICKABLES_JS, MENU_JS, TEXTBOX_JS, LMS_JS, TRANSCRIPT_JS, OVERLAP_JS)
+                     STATE_JS, FINGERPRINT_JS, CLICKABLES_JS, MENU_JS, TEXTBOX_JS, LMS_JS, TRANSCRIPT_JS, OVERLAP_JS, OVERFLOW_JS)
 from .quiz import QuizMixin, assessment_parts
 
 WORD = re.compile(r"[a-z0-9']+")
@@ -2344,6 +2344,21 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
         return gone()
 
     def _overlap_check(self, page, sid, where, seen, shot=None):
+        try:
+            spills = page.evaluate(OVERFLOW_JS)
+        except Exception:
+            spills = []
+        for h in spills[:3]:
+            key = ("spill", h["t"])
+            if key in seen:
+                continue
+            seen.add(key)
+            msg = ("Text runs out of its box into the picture" if h["overPic"] else
+                   "Text runs off the slide" if h["off"] else "Text runs out of its box")
+            self.col.add("visual", "error", msg + (f" (after opening “{where}”)" if where else ""),
+                         slide_id=sid, slide_label=self.label(sid), detail=f"“{h['t'][:80]}”",
+                         screenshot=shot or self.shot(page, f"{sid}_spill{len(seen)}"), box=h["box"], vw=1366,
+                         found_in="OST", fix="Shorten the text or resize its box so it fits and does not cover the picture.")
         try:
             hits = page.evaluate(OVERLAP_JS)
         except Exception:

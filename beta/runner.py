@@ -338,11 +338,17 @@ class Run:
             items = [i for i in items if i["source"] not in ("captions", "transcript")]
         self.proofread(items, lambda it: it.get("slide", ""))
         self.english_check(course, visits, opts.get("english", "auto"))
-        if opts.get("stage") == "alpha":   # Alpha: logic and facts are reviewed too
-            self.col.ran("logic")
-            self.tasks["logic_check"] = [{"slide_id": s.id, "label": s.label, "title": s.title,
-                                          "text": "\n".join(s.texts), "transcript": visits.get(s.id, {}).get("transcript_text") or s.notes}
-                                         for s in course.slides if s.texts or s.notes]
+        if opts.get("stage") == "alpha":   # Alpha: every screen is reviewed in full, with its screenshot
+            for c in ("logic", "consistency", "visual"):
+                self.col.ran(c)
+            self.tasks["course_title"] = course.title
+            self.tasks["logic_check"] = [dict({"slide_id": s.id, "label": s.label, "position": n + 1, "title": s.title,
+                                               "text": "\n".join(s.texts),
+                                               "transcript": visits.get(s.id, {}).get("transcript_text") or s.notes,
+                                               "shot": visits.get(s.id, {}).get("shot", "")},
+                                              **({"question": True, "options": [{"text": c.get("text", ""), "marked_correct": bool(c.get("correct"))}
+                                                                                for c in s.choices]} if s.is_quiz and s.choices else {}))
+                                         for n, s in enumerate(course.slides) if s.texts or s.notes or s.title]
 
         # ---- transcript (captions present, and captions vs the transcript script)
         self.transcript_scorm(course, visits)
@@ -684,7 +690,7 @@ class Run:
         if variant not in ("us", "uk"):
             variant = sbreview.majority_variant(pages)
             self.log(f"English variant not chosen: the storyboard mostly uses {variant.upper()} English")
-        auto = sbreview.auto_checks(pages, marked, variant)
+        auto = sbreview.auto_checks(pages, marked, variant) + sbreview.layout_checks(path, self.dir / "sb")
         for g in sbreview.GROUPS:
             self.col.ran(g)
         for i in auto:

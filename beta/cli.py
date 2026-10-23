@@ -167,8 +167,14 @@ def cmd_merge(a):
             sb_says=v.get("sb_says", ""), sb_page=v.get("sb_page") or "",
             screenshot=_shot_for(sl, v.get("course_says", "")))
     slide_label = lambda sid: next((x.get("label") for x in res.get("slides", []) if x.get("id") == sid), "")
+    AREA = {"logic": "logic", "flow": "logic", "facts": "logic", "consistency": "consistency", "alignment": "consistency",
+            "visual": "visual", "image": "visual", "layout": "visual", "assessment": "assessment"}
+    FOUND = {"title": "Slide Title", "ost": "OST", "vo": "Transcript", "image": "Graphic", "buttons": "Buttons",
+             "assessment": "Assessment", "flow": "Content Flow", "menu": "Menu"}
     for kind, check in (("logic_check", "logic"), ("assessment_review", "assessment")):
         for v in ans.get(kind, []):
+            if kind == "logic_check":
+                check = AREA.get(str(v.get("area") or "logic").lower(), "logic")
             sid = v.get("slide_id") or ""
             details = [f"“{v['quote']}”"] if v.get("quote") else []
             if v.get("explanation"):
@@ -176,6 +182,7 @@ def cmd_merge(a):
             add(check=check, severity=v.get("severity") if v.get("severity") in ("error", "warning") else "warning",
                 message=v.get("issue", "Check this"), slide_id=sid, slide_label=slide_label(sid), detail="\n".join(details),
                 suggestion=v.get("suggestion", ""), fix=v.get("suggestion", ""), course_says=v.get("quote", ""), locate=(v.get("quote") or "")[:80],
+                found_in=FOUND.get(str(v.get("found_in") or "").lower(), ""),
                 screenshot=next((x.get("shot", "") for x in res.get("slides", []) if x.get("id") == sid), ""))
     rules = {r["rule"]: r["text"] for r in (tasks.get("sb_review") or {}).get("rules", [])}
     from beta.sbreview import RULE_GROUP, FOUND_IN

@@ -43,8 +43,10 @@ def category(f):
         return "Suggestion"
     if f.get("blocker"):
         return "High"
-    if c in ("assessment", "logic", "interactivity"):
+    if c in ("assessment", "logic", "interactivity", "visual"):
         return "High" if sev == "error" else "Medium"
+    if c == "consistency":
+        return "Medium" if sev == "error" else "Low"
     if c.startswith("sb_"):
         if f.get("found_in") == "SB-Spelling":
             return "High"
@@ -82,7 +84,7 @@ def issue_found_in(f):
         return "Slide Title" if "title" in msg else "OST"
     if c.startswith("sb_"):
         return f.get("found_in") if f.get("found_in") in ISSUE_LIST else "SB-OST"
-    if c in ("content", "restrictions", "interactivity", "assessment") and f.get("found_in") in ISSUE_LIST:
+    if c in ("content", "restrictions", "interactivity", "assessment", "logic", "consistency", "visual") and f.get("found_in") in ISSUE_LIST:
         return f["found_in"]
     if c in ("content", "restrictions"):
         return "Content Flow" if c == "content" else "Navigation"
@@ -96,7 +98,8 @@ def issue_found_in(f):
         return "OST"
     return {"navigation": "Navigation", "swipe": "Navigation", "menu": "Menu", "buttons": "Buttons",
             "screen_number": "Header", "transcript": "Transcript", "audio": "Audio", "seekbar": "Seek Bar",
-            "video": "Video", "assessment": "Assessment", "logic": "Content Flow"}.get(c, "Navigation")
+            "video": "Video", "assessment": "Assessment", "logic": "Content Flow", "consistency": "OST",
+            "visual": "Graphic"}.get(c, "Navigation")
 
 
 def feedback_text(f):

@@ -19,6 +19,8 @@ CHECKS = [
     ("assessment", "Assessment"),
     ("interactivity", "Clickables & pop-ups"),
     ("logic", "Logic & facts"),
+    ("consistency", "Consistency & standards"),
+    ("visual", "Images & text layout"),
     ("sb_language", "SB: Language"),
     ("sb_consistency", "SB: Consistency"),
     ("sb_structure", "SB: Structure & assessment"),

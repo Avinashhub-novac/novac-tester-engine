@@ -43,6 +43,8 @@ RULES = [
     ("sb_standards", "Voice and style must remain consistent across the module."),
     ("sb_standards", "Grammatical parallelism must be maintained."),
     ("sb_logic", "Content must be logical and factually correct (facts, figures, calculations, dates, cause and effect, steps in the right order)."),
+    ("sb_alignment", "OST must fit its text area and must not run into or cover pictures or other text."),
+    ("sb_logic", "Screens must follow the learning order (agenda, menu and topic sequence); no screen may be out of place."),
 ]
 RULE_GROUP = {i + 1: g for i, (g, _) in enumerate(RULES)}
 
@@ -340,3 +342,79 @@ def majority_variant(pages):
     us = sum(1 for w in words for a, b in US_UK if a not in AMBIGUOUS and w.startswith(a) and not w.startswith(b))
     uk = sum(1 for w in words for a, b in US_UK if a not in AMBIGUOUS and w.startswith(b))
     return "uk" if uk > us else "us"
+
+
+def _norm_word(w):
+    return re.sub(r"[^\w]", "", (w or "").lower())
+
+
+def layout_checks(path: Path, sb_dir: Path):
+    """PowerPoint storyboards: text that runs out of its text box (into a picture, or off the slide).
+    Measured, not judged: the words LibreOffice draws on each page picture (sb_dir/words.json) are compared with the
+    text boxes and pictures of the slide. Returns issues in the auto_checks format (rule 22)."""
+    import json
+    if path.suffix.lower() != ".pptx":
+        return []
+    try:
+        from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+        from PIL import Image
+        prs = Presentation(str(path))
+        words_by_page = json.loads((sb_dir / "words.json").read_text())
+    except Exception:
+        return []
+    W, H = prs.slide_width, prs.slide_height
+    visible = [s for s in prs.slides if s._element.get("show") != "0"]   # hidden slides are not in the PDF
+    out = []
+    for n, slide in enumerate(visible, 1):
+        words = words_by_page.get(str(n)) or []
+        pic = sb_dir / f"page{n}.png"
+        if not words or not pic.exists():
+            continue
+        with Image.open(pic) as im:
+            pw, ph = im.size
+        kx, ky = pw / W, ph / H
+
+        def box(sh):
+            return (sh.left * kx, sh.top * ky, (sh.left + sh.width) * kx, (sh.top + sh.height) * ky)
+        texts, pics = [], []
+        for sh in slide.shapes:
+            if sh.left is None or sh.width is None:
+                continue
+            if sh.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                pics.append(box(sh))
+            elif getattr(sh, "has_text_frame", False) and sh.text_frame.text.strip():
+                toks = [_norm_word(t) for t in sh.text_frame.text.split()]
+                texts.append({"box": box(sh), "words": {t for t in toks if t}, "text": sh.text_frame.text.strip(), "spill": []})
+            elif getattr(sh, "has_table", False):
+                texts.append({"box": box(sh), "words": set(), "text": "", "spill": [], "table": True})
+        inside = lambda w, b, tol=3: b[0] - tol <= w[1] + w[3] / 2 <= b[2] + tol and b[1] - tol <= w[2] + w[4] / 2 <= b[3] + tol
+        for w in words:
+            if any(inside(w, t["box"]) for t in texts):
+                continue
+            nw = _norm_word(w[0])
+            if not nw:
+                continue
+            cx = w[1] + w[3] / 2
+            # the text box this word belongs to: same column, the word is above or below it, and the box holds the word
+            cand = [t for t in texts if not t.get("table") and nw in t["words"] and t["box"][0] - 4 <= cx <= t["box"][2] + 4]
+            if not cand:
+                continue
+            t = min(cand, key=lambda t: min(abs(w[2] - t["box"][3]), abs(t["box"][1] - (w[2] + w[4]))))
+            t["spill"].append(w)
+        for t in texts:
+            sp = t["spill"]
+            if len(sp) < 2:
+                continue
+            spill_box = (min(w[1] for w in sp), min(w[2] for w in sp), max(w[1] + w[3] for w in sp), max(w[2] + w[4] for w in sp))
+            over_pic = any(not (spill_box[2] < p[0] or spill_box[0] > p[2] or spill_box[3] < p[1] or spill_box[1] > p[3]) for p in pics)
+            off = spill_box[3] > ph - 2 or spill_box[2] > pw - 2
+            first = " ".join(t["text"].split()[:8])
+            issue = ("OST runs out of its text box into the picture" if over_pic else
+                     "OST runs off the slide" if off else "OST runs out of its text box")
+            out.append({"page": n, "rule": 22, "group": "sb_alignment", "severity": "error", "issue": issue,
+                        "quote": first, "found_in": "ost",
+                        "detail": f"{len(sp)} words are drawn outside the text box"
+                                  + (" and over a picture." if over_pic else "."),
+                        "fix": "Shorten the OST or resize its box so it fits and does not cover the picture."})
+    return out

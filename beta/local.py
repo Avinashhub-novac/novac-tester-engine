@@ -240,11 +240,37 @@ def _request(state):
             if p.exists():
                 pics.append((k, p))
         sbr.pop("page_pictures", None)
+    for it in (tasks.get("logic_check") or [])[:80]:   # Alpha: the screenshot of every screen (images and layout)
+        p = run_dir / it.get("shot", "") if it.get("shot") else None
+        if p and p.exists():
+            pics.append((f"screen {it.get('label', '')} (slide_id {it.get('slide_id', '')})", p))
     has_work = any(tasks.get(k) for k in KEYS)
     text = RULES.read_text() + "\n\n# TASKS (JSON)\n\n```json\n" + json.dumps(strip(tasks), ensure_ascii=False, indent=1) + "\n```\n"
     for title, body in files.items():
         text += f"\n\n# {title}\n\n{body}\n"
     return text, pics, has_work
+
+
+def _pictures_pdf(pics, path):
+    """For a review in a Claude chat: every picture of the review on its own labelled page of one PDF."""
+    if not pics:
+        return None
+    from PIL import Image, ImageDraw
+    pages = []
+    for k, p in pics[:100]:
+        try:
+            im = Image.open(p).convert("RGB")
+        except Exception:
+            continue
+        im.thumbnail((1600, 1600))
+        page = Image.new("RGB", (im.width, im.height + 40), "white")
+        page.paste(im, (0, 40))
+        ImageDraw.Draw(page).text((10, 12), f"Picture of SB page {k}" if isinstance(k, int) else f"Picture: {k}", fill="black")
+        pages.append(page)
+    if not pages:
+        return None
+    pages[0].save(path, save_all=True, append_images=pages[1:])
+    return path
 
 
 def _extract_json(txt):
@@ -265,7 +291,7 @@ def _api_review(text, pics):
     content = [{"type": "text", "text": text}]
     import base64
     for k, p in pics:
-        content += [{"type": "text", "text": (f"Picture of SB page {k}:" if isinstance(k, int) else f"Picture: {k}")},
+        content += [{"type": "text", "text": (f"Picture of SB page {k}:" if isinstance(k, int) else f"Picture: {k}:")},
                     {"type": "image", "source": {"type": "base64", "media_type": "image/png",
                                                  "data": base64.b64encode(p.read_bytes()).decode()}}]
     body = {"model": model, "max_tokens": 32000, "messages": [{"role": "user", "content": content}],
@@ -306,10 +332,12 @@ def _review(out, state):
             print(f"  {e} – falling back to a review in a Claude chat.")
     req = out / "REVIEW_REQUEST.md"
     req.write_text(text)
+    pdf = _pictures_pdf(pics, out / "REVIEW_PICTURES.pdf")
+    also = f"\n     and also attach:  {pdf}  (the pictures the review looks at)" if pdf else ""
     print(f"""
 Content review – one step for you:
   1. Open Claude (claude.ai) and start a new chat.
-  2. Attach this file:  {req}
+  2. Attach this file:  {req}{also}
      and type:  Follow the instructions in this file and give me the JSON as a downloadable answers.json file.
   3. Save Claude's answers.json into the same folder:  {out}
   4. Run:  python -m beta.local finish "{out}"

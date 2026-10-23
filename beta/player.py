@@ -349,6 +349,43 @@ OPTIONS_JS = r"""
 }
 """
 
+# Text drawn outside its own text box (the box is too small for it), and whether the spill covers a picture.
+OVERFLOW_JS = r"""
+() => {
+  const out = [];
+  const shown = el => { for (let e = el; e && e !== document.body; e = e.parentElement) {
+      const s = getComputedStyle(e); if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) < 0.2) return false; }
+    return true; };
+  const R = el => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
+  const hit = (a, b) => a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+  const slide = document.querySelector('.window-slide, .primary-slide, .slide');
+  const frame = slide ? R(slide) : [0, 0, innerWidth, innerHeight];
+  const area = r => Math.max(0, r[2] - r[0]) * Math.max(0, r[3] - r[1]);
+  const pics = [...document.querySelectorAll('.slideobject-maskable')].filter(d => shown(d) && d.querySelector('image, img, video, canvas'))
+    .map(d => R(d)).filter(r => area(r) < 0.6 * area(frame));   // a full-slide background is not "the picture"
+  const accText = box => { const h = box.closest('[data-model-id]'); const id = h && h.getAttribute('data-model-id');
+    const a = id && document.getElementById('acc-' + id); return a ? a.textContent : ''; };
+  for (const t of document.querySelectorAll('g.vector-text-item')) {
+    if (!shown(t)) continue;
+    const box = t.closest('.slideobject-maskable'); if (!box) continue;
+    const b = R(box), tr = R(t), raw = (t.textContent || '').replace(/\s+/g, ' ').trim();
+    const acc = (accText(box) || '').replace(/\s+/g, ' ').trim();
+    const text = /[\ue000-\uf8ff]/.test(raw) && acc ? acc : raw.replace(/[\ue000-\uf8ff]/g, '');
+    if (!text || tr[2] - tr[0] < 4 || b[3] - b[1] < 4) continue;
+    const lines = Math.max(1, t.querySelectorAll('text').length), lh = (tr[3] - tr[1]) / lines;
+    const below = tr[3] - b[3], above = b[1] - tr[1], tol = Math.max(6, 0.5 * lh);
+    if (below <= tol && above <= tol) continue;
+    const spill = below > tol ? [tr[0], b[3], tr[2], tr[3]] : [tr[0], tr[1], tr[2], b[1]];
+    const myPic = R(box);
+    const overPic = pics.some(p => hit(spill, p) && !(p[0] === myPic[0] && p[1] === myPic[1]));
+    const off = tr[3] > frame[3] + 2 || tr[1] < frame[1] - 2;
+    out.push({ t: text.slice(0, 120), overPic, off, box: [Math.min(tr[0], b[0]), Math.min(tr[1], b[1]),
+      Math.max(tr[2], b[2]) - Math.min(tr[0], b[0]), Math.max(tr[3], b[3]) - Math.min(tr[1], b[1])] });
+  }
+  return out;
+}
+"""
+
 # Text that overlaps other visible text (both pieces on top, so the learner sees them on each other).
 OVERLAP_JS = r"""
 () => {

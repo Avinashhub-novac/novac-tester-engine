@@ -10,7 +10,8 @@ Use an empty list where a task is empty or missing.
 
 STAY IN SCOPE: do only the tasks that are given, and only what each task's rules below ask for. Never report anything
 else, even if you notice it (for example: no logic or fact issues outside logic_check, no style issues in a Gold
-review, no layout or design opinions anywhere). Anything outside the stage's scope is removed from the report.
+review, no design opinions or matters of taste anywhere; the only layout problems reported are the ones sb_review
+rules 14 and 22 and logic_check "visual" name). Anything outside the stage's scope is removed from the report.
 
 CONSISTENCY: go through the items strictly in the order they are given, apply exactly the rules below and nothing
 else, and do not report matters of taste or opinion. When unsure whether something is a mistake, do not report it.
@@ -90,13 +91,41 @@ page N ===" marker above it; omit if unknown), "course_says": exact course text 
 "suggestion": what needs to be done, in one short plain sentence, "explanation": one short plain sentence}.
 
 ## logic_check
-Only if tasks.logic_check is not empty (Alpha). For each screen, check that the content makes sense and is correct:
-contradictions within a screen or between screens, wrong calculations or percentages, numbers that do not add up,
-steps in the wrong order, cause and effect that does not hold, and clear factual errors (definitions, dates, units,
-well-known facts). Only report clear problems you can explain.
-Entry: {"slide_id", "issue": short plain description (e.g. "Numbers do not add up", "Step 3 comes before step 2",
-"Wrong unit"), "quote": exact on-screen words copied character for character, "suggestion": what needs to be done,
-"severity": "error" | "warning", "explanation": one short plain sentence with the reason}.
+Only if tasks.logic_check is not empty (Alpha: the course is reviewed screen by screen, in full). Each item is one
+screen in course order ("position"), with its title, on-screen text ("text"), narration ("transcript") and a
+screenshot ("shot", a picture file in the run folder – open it with the Read tool; at most 80 screens). Question
+screens also list their answer options and which one the course marks as correct ("marked_correct").
+tasks.course_title is the course's name. Go through the screens from the first to the last and check each one for the
+problems below, then check the rules that need the whole course (consistency, order, recap, assessment). Report each
+problem once, on the first screen where it is (name the others in "explanation"). Do not report spelling and grammar
+(proofread does that), US/UK spelling (the engine does that) or differences from the SB (sb_compare does that).
+Every entry has an "area":
+- "logic": contradictions within a screen or between screens; wrong facts or definitions; wrong calculations,
+  percentages or numbers that do not add up; cause and effect that does not hold; steps or instructions in the wrong
+  order (e.g. "FOLLOW GUIDANCE • STOP • REPORT"); an action that contradicts the course's advice (e.g. "IGNORE" where the
+  course says report); a recap point that contradicts or is missing from the content; a screen out of the learning order
+  (compare the titles with the agenda, the menu and the topic sequence; name the misplaced screen and where it belongs,
+  not only its screen number); the wrong course or company name anywhere (compare with tasks.course_title and the
+  welcome screen).
+- "consistency": screen titles cased differently from the other titles; bullets or similar lines that end differently
+  (some with a full stop, some without); list items or headings not in parallel form (e.g. "Enabling …" among "Never
+  approve …", "Report …"); instructions or button labels worded or cased differently on similar screens (e.g. "Click the
+  correct option and press submit." where the others say "SELECT ONE ANSWER." and "SUBMIT"); acronyms not spelled out at
+  first use; a title that does not fit the screen's content; OST and narration that say different or contradicting
+  things (OST may be shorter).
+- "visual" (look at the screenshot): a picture or illustration that shows a different topic from the screen's title,
+  OST and narration; text that runs past its box or the slide edge, sits on a picture, or touches other text; text cut
+  off. Decorative backgrounds, logos and icons are not checked. Text placed on a plain banner or panel made for it is not
+  a mistake.
+- "assessment": the rules screen, the questions and the results screen disagree (pass mark, number of questions,
+  attempts); questions numbered out of sequence (the first question is not Question 1, two questions share a number);
+  the option marked correct is not the right answer by the course's own content; a question about something the
+  course does not teach; a question whose options do not fit it.
+Entry: {"slide_id", "area": "logic"|"consistency"|"visual"|"assessment", "issue": short plain description (at most 12
+words, e.g. "Steps are in the wrong order", "Image does not match the screen topic", "First question is numbered 3"),
+"quote": exact on-screen words copied character for character (for an image, the screen title), "suggestion": what
+needs to be done, "severity": "error" | "warning", "found_in": "title"|"ost"|"vo"|"image"|"buttons"|"assessment"|
+"flow"|"menu", "explanation": one short plain sentence with the reason}.
 
 ## assessment_review
 Only if tasks.assessment_review exists (Gold / Showstopper). Check the assessment works as the rules say: number of
@@ -129,11 +158,27 @@ screen · 15 menu titles match screen titles · 16 button labels cased the same 
 module standards (acronyms spelled out at first use; consistent lead-ins, CYU intros and recap lead-ins) · 18 pronouns
 consistent (e.g. "you" throughout, not "you" and "the learner") · 19 one voice and style · 20 parallel structure in
 lists and headings · 21 content is logical and factually correct (facts, figures, calculations, dates, cause and
-effect, steps in the right order).
+effect, steps in the right order) · 22 OST fits its text area and does not run into or cover a picture or other text
+· 23 screens follow the learning order (agenda, menu and topic sequence); no screen is out of place.
 HOW TO WORK (so nothing is missed): go through the storyboard page by page, from the first page to the last, and on
 every page check its VO (in a PowerPoint storyboard the VO is usually in the "Notes:" line), its OST, its title and any
 question, options and feedback against every rule. Then check the rules that need the whole storyboard (2, 5, 7, 11,
-13, 15, 16, 17, 18, 19). Look at every page picture you are given. Typical real mistakes to look for: typos and wrong
+13, 15, 16, 17, 18, 19, 23). Look at every page picture you are given.
+THREE CHECKS THAT ARE NEVER SKIPPED, on every page with a picture:
+- IMAGE (rule 14): say to yourself in a few words what each picture or illustration on the page shows, then compare it
+  with the screen's title, OST and VO. A picture that shows a different topic (for example sign-in and MFA on a screen
+  about sharing data) is an error: "issue" "Image does not match the screen topic", "found_in": "image", "quote": the
+  screen title, "suggestion" says what the picture should show. Decorative backgrounds, logos and icons are not checked.
+- TEXT FIT (rule 22): text that runs past the edge of its box or the slide, sits on top of a picture or illustration,
+  or touches other text is an error: "issue" "OST runs into the picture" (or "OST runs off the slide", "OST covers
+  other text"), "found_in": "ost", "quote": the first words of that OST, "suggestion" "Shorten the OST or resize its
+  box so it does not cover the picture." Text placed on a plain banner or panel made for it is not a mistake. Report
+  the layout problem even if you also report the wording of the same OST: these are two separate entries.
+- ORDER (rule 23): list the screen titles in order and compare them with the learning agenda, the menu and the topic
+  order (each screen builds on the one before). A screen that is out of place is an error: "issue" names it (e.g.
+  "Lock and Protect Your Device comes before Keep Software Up to Date"), "found_in": "flow", "quote": the title of the
+  misplaced screen, "suggestion" says where it belongs. When screen numbers are also out of sequence because of it,
+  say so in "explanation" – report the misplaced screen, not only the numbers. Typical real mistakes to look for: typos and wrong
 words in the VO, missing or extra words, doubled words or full stops, wrong numbers or totals in tables and VO,
 VO and OST giving different figures, a title that does not fit the screen, a question with no feedback, the wrong
 course or company name, acronyms never spelled out, and lists whose items are written in different forms.
