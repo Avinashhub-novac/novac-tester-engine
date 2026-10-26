@@ -19,7 +19,7 @@ class Run:
         self.meta = json.loads((run_dir / "run.json").read_text())
         # stage rules: Alpha never tests mobile; Beta always runs the transcript check
         opts = self.meta.setdefault("options", {})
-        if opts.get("stage") == "alpha":
+        if opts.get("stage") in ("alpha", "localized", "hindi"):
             opts["swipe"] = False
         elif opts.get("stage") == "beta":
             opts["transcript"] = True
@@ -197,6 +197,9 @@ class Run:
             passes.remove("restrict")
         if gold:   # Gold / Showstopper: functionality only (navigation, the assessment, restrictions as per SOW)
             passes = ["desktop", "prev", "assessment"] + (["restrict"] if wants_restrict else [])
+        localized = stage in ("localized", "hindi")   # Localize: a translated course mapped against its translated SB
+        if localized:
+            passes = ["desktop", "prev", "menu"] + (["buttons"] if opts.get("buttons") else [])
         from .quiz import assessment_parts as _ap
         if not any(s.is_quiz for s in course.slides) and not _ap(course)[1]:
             passes = [p for p in passes if p != "assessment"]
@@ -254,7 +257,7 @@ class Run:
             return
         if "mobile" not in passes:
             self.col.skip("swipe", "Alpha review: mobile is not tested" if opts.get("stage") == "alpha"
-                          else "Mobile pass turned off for this run")
+                          else "Localize: mobile is not tested" if localized else "Mobile pass turned off for this run")
         if "buttons" not in passes:
             self.col.skip("buttons", "Buttons pass turned off for this run")
 
@@ -337,7 +340,10 @@ class Run:
         if not opts.get("transcript", True):
             items = [i for i in items if i["source"] not in ("captions", "transcript")]
         self.proofread(items, lambda it: it.get("slide", ""))
-        self.english_check(course, visits, opts.get("english", "auto"))
+        if localized:
+            self.localize_task()
+        else:
+            self.english_check(course, visits, opts.get("english", "auto"))
         if opts.get("stage") == "alpha":   # Alpha: every screen is reviewed in full, with its screenshot
             for c in ("logic", "consistency", "visual"):
                 self.col.ran(c)
@@ -490,6 +496,17 @@ class Run:
                            "captions": (s.captions or v.get("captions", []))[:50]})
         return slides
 
+    def localize_task(self):
+        """Localize: the course is in another language. The reviewer proofreads that language and reports English
+        left untranslated on screen (except the terms the team keeps in English)."""
+        from . import langs
+        opts = self.meta.get("options", {})
+        code = langs.code_of(opts)
+        L = langs.get(code)
+        self.col.ran("translation")
+        self.tasks.update(language=code, language_name=L["name"], script=L["script"], rtl=L["rtl"],
+                          keep_in_english=opts.get("keep_terms", ""))
+
     def english_check(self, course, visits, variant):
         """US / UK spelling must follow the course's choice (or, when not chosen, the spelling the course mostly uses)."""
         from . import sbreview
@@ -600,7 +617,7 @@ class Run:
         """Hands the storyboard text and the course content to Claude for screen-by-screen mapping."""
         sb = self.meta.get("storyboard")
         if not sb:
-            if self.meta.get("options", {}).get("stage") == "alpha":  # matching with the SB is a must for Alpha
+            if self.meta.get("options", {}).get("stage") in ("alpha", "localized", "hindi"):  # the SB is a must for Alpha and Localize
                 self.col.add("content", "error", "Storyboard not uploaded: content could not be matched with the SB",
                              detail="Upload the course again together with its storyboard.")
             else:
@@ -791,6 +808,8 @@ class Run:
                               "text": " ".join(c[2] for c in ch), "cap_shots": cap_shots,
                               "shot": cap_shots[0]["shot"] if cap_shots else ""})
             self.proofread(items, lambda it: it.get("slide", ""))
+            if self.meta.get("options", {}).get("stage") in ("localized", "hindi"):
+                self.localize_task()
             self.storyboard_task([{"id": it["id"], "label": it["slide"], "time": it["time"], "captions": it["text"],
                                    "shot": it["shot"]} for it in items])
             if cue_end := cues[-1][1]:
@@ -805,7 +824,9 @@ class Run:
                 wav = self.dir / "audio.wav"
                 media.to_wav(path, wav)
                 try:
-                    segs = media.transcribe(wav)
+                    _o = self.meta.get("options", {})
+                    from . import langs as _langs
+                    segs = media.transcribe(wav, _langs.code_of(_o) if _o.get("stage") in ("localized", "hindi") else "en")
                 except media.STTUnavailable as e:
                     self.col.skip("transcript", str(e))
                     segs = None
@@ -906,10 +927,13 @@ def issue_to_finding(iss, item):
     src = item.get("source", "text")
     in_transcript = src in ("captions", "transcript", "notes")
     check = "transcript" if in_transcript else ("spelling" if cat == "spelling" else "grammar")
+    if cat in ("untranslated", "translation"):   # Localize: English left in a translated course
+        check, cat = "translation", "untranslated"
     where = {"captions": "captions / transcript", "transcript": "captions / transcript"}.get(src, src)
     return {"check": check,
             "severity": iss.get("severity") if iss.get("severity") in ("error", "warning") else "warning",
-            "message": f"{cat.capitalize()} in {where}: “{iss.get('original', '')}”",
+            "message": (f"Not translated in {where}: “{iss.get('original', '')}”" if cat == "untranslated"
+                        else f"{cat.capitalize()} in {where}: “{iss.get('original', '')}”"),
             "slide_id": item.get("slide_id", ""), "slide_label": item.get("label", ""), "time": item.get("time", ""),
             "suggestion": iss.get("suggestion", ""), "detail": iss.get("explanation", ""),
             "course_says": iss.get("original", ""),

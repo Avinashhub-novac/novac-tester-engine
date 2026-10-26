@@ -8,6 +8,7 @@ import re
 
 # (pattern, replacement message, short label for the screenshot tag)
 RULES = [
+    (r"^Not translated (?:into \w+ )?in (.+?): “(.+)”$", lambda m: f"English text left untranslated in {_where(m.group(1))}: “{m.group(2)}”", "Not translated"),
     # navigation
     (r"^Missing file \((\d+)\)$", "A file is missing from the course (it does not load)", "File missing"),
     (r"^Script error.*$", "The course shows an error while running", "Error on this screen"),

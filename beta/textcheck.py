@@ -2,7 +2,7 @@
 import difflib
 import re
 
-WORDS = re.compile(r"[a-z0-9]+(?:'[a-z]+)?")
+WORDS = re.compile(r"[a-z0-9\u0900-\u097f\u0a00-\u0a7f\u0b80-\u0bff\u0c00-\u0cff\u0d00-\u0d7f\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]+(?:'[a-z]+)?")
 NUM_WORDS = {"zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6",
              "seven": "7", "eight": "8", "nine": "9", "ten": "10", "percent": "%", "okay": "ok"}
 SCREEN_RES = [

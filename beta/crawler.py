@@ -14,7 +14,7 @@ from .player import (SEL, PLAYER_BUTTONS, VISITED_CLASSES, CURRENT_CLASSES, INIT
                      STATE_JS, FINGERPRINT_JS, CLICKABLES_JS, MENU_JS, TEXTBOX_JS, LMS_JS, TRANSCRIPT_JS, OVERLAP_JS, OVERFLOW_JS)
 from .quiz import QuizMixin, assessment_parts
 
-WORD = re.compile(r"[a-z0-9']+")
+WORD = re.compile(r"[a-z0-9'\u0900-\u097f\u0a00-\u0a7f\u0b80-\u0bff\u0c00-\u0cff\u0d00-\u0d7f\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]+")
 
 
 def _norm(s):

@@ -55,6 +55,8 @@ def category(f):
         return "Low" if msg.startswith("punctuation") else "Medium"
     if c == "spelling":
         return "High"
+    if c == "translation":
+        return "High" if sev == "error" else "Medium"
     if c in ("content", "restrictions"):
         return "High" if sev == "error" else "Medium"
     if c == "transcript" and msg.startswith("spelling"):
@@ -90,7 +92,7 @@ def issue_found_in(f):
         return "Content Flow" if c == "content" else "Navigation"
     if c == "interactivity":
         return "Buttons"
-    if c in ("grammar", "spelling"):
+    if c in ("grammar", "spelling", "translation"):
         if " in slide title" in msg:
             return "Slide Title"
         if " in captions" in msg or " in notes" in msg:
@@ -220,7 +222,11 @@ def build(res, meta, run_dir: Path, out_path: Path, review_date=None):
     ws["C2"] = res.get("course_title") or Path(meta.get("name", "")).stem
     ws["C3"] = meta.get("name", "")
     _stage = (res.get("stage") or (meta.get("options") or {}).get("stage") or "beta")
-    ws["C4"] = {"sb": "SB", "gold": "Gold / Showstopper"}.get(_stage, _stage.capitalize())
+    if _stage in ("localized", "hindi"):
+        from .langs import get as _lg, code_of as _lc
+        ws["C4"] = f"Localize – {_lg(_lc(meta.get('options'))).get('name')} content mapping"
+    else:
+        ws["C4"] = {"sb": "SB", "gold": "Gold / Showstopper"}.get(_stage, _stage.capitalize())
     ws["C5"] = "QC review (automated)"
     ws["C6"] = meta.get("name", "")
     ws["G6"] = "Change set number:"

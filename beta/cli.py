@@ -240,7 +240,7 @@ def cmd_merge(a):
 
 
 def _norm_word(w):
-    return re.sub(r"[^\w']+", "", w.lower())
+    return re.sub(r"[^\w'\u0900-\u097f\u0a00-\u0a7f\u0b80-\u0bff\u0c00-\u0cff\u0d00-\u0d7f\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]+", "", w.lower())
 
 
 def _find_text_box(tb, needle):
@@ -295,7 +295,7 @@ def _locate(f, slide, shot_boxes=None, src_rel=""):
     needle = f.get("locate")
     if not needle and f["check"] == "buttons" and f.get("detail"):
         needle = f["detail"].split("\n")[0]
-    if not needle and f["check"] in ("grammar", "spelling", "transcript"):
+    if not needle and f["check"] in ("grammar", "spelling", "transcript", "translation"):
         m = re.search(r"“(.+?)”", f["message"])
         needle = m.group(1) if m else None
     if needle:
@@ -481,7 +481,7 @@ def _side_by_side(a, b, out, cap_a, cap_b):
 def _needle(f):
     if f.get("locate"):
         return f["locate"]
-    if f.get("check") in ("grammar", "spelling", "transcript"):
+    if f.get("check") in ("grammar", "spelling", "transcript", "translation"):
         m = re.search(r"“(.+?)”", f.get("message", ""))
         return m.group(1) if m else None
     return None
@@ -534,7 +534,7 @@ def _group(findings, slides):
                (f.get("detail") or "").split("\n")[0] if f.get("check") in ("grammar", "spelling", "transcript", "logic") else "")
         across.setdefault(key, []).append(f)
     for key, group in across.items():
-        need = 2 if key[0] in ("grammar", "spelling", "transcript") else 3   # the same mistake in the same words
+        need = 2 if key[0] in ("grammar", "spelling", "transcript", "translation") else 3   # the same mistake in the same words
         if len(group) < need or key[0] == "buttons":
             final.extend(group)
             continue
@@ -905,6 +905,171 @@ def cmd_check_env(a):
     return 0 if r["ok"] else 3
 
 
+
+# ------------------------------------------------------------- Localize, step 1: English SB -> translated SB
+def _tr_dir(a):
+    run_dir = Path(a.work).resolve() / "runs" / a.id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def cmd_tr_extract(a):
+    """Reads the English SB and writes the batches Claude translates."""
+    from beta import translate
+    from beta.progress import Progress, plan_translate
+    run_dir = _tr_dir(a)
+    up = Path(a.upload)
+    dest = run_dir / up.name
+    if up.resolve() != dest.resolve():
+        shutil.copy(up, dest)
+    opts = json.loads(a.options or "{}")
+    meta = {"id": a.id, "kind": "translate", "name": a.name or up.name, "file": up.name, "options": opts,
+            "created": time.time(), "status": "running"}
+    (run_dir / "run.json").write_text(json.dumps(meta, indent=1))
+    pr = Progress(run_dir)
+    pr.phase("extract")
+    log = run_dir / "log.txt"
+    from beta import langs
+    with log.open("a", encoding="utf-8") as lf:
+        lf.write(f"{time.strftime('%H:%M:%S')}  Reading the English storyboard (to {langs.get(langs.code_of(opts))['name']})\n")
+    try:
+        info = translate.extract(dest, run_dir, opts)
+    except translate.TranslateError as e:
+        print(json.dumps({"status": "failed", "error": str(e)}))
+        return 1
+    pr.set_plan(plan_translate(info["words"], len(info["batches"])))
+    pr.phase("terms")
+    with log.open("a", encoding="utf-8") as lf:
+        lf.write(f"{time.strftime('%H:%M:%S')}  {info['unique_texts']} texts to translate ({info['words']} words) in "
+                 f"{len(info['batches'])} parts\n")
+    print(json.dumps({"status": "ok", **info}, indent=1, ensure_ascii=False))
+    return 0
+
+
+def cmd_tr_check(a):
+    """Checks one translated batch; prints the problems to fix (if any) and moves the progress bar."""
+    from beta import translate
+    from beta.progress import Progress
+    run_dir = _tr_dir(a)
+    try:
+        res = translate.check_batch(run_dir, Path(a.batch))
+    except translate.TranslateError as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+        return 1
+    pr = Progress(run_dir)
+    pr.tick("translate", res["done_batches"], res["total_batches"])
+    if res["ok"]:
+        editing = (run_dir / "tr" / "draft.json").exists()   # after the first draft, a re-check is the editing pass
+        with (run_dir / "log.txt").open("a", encoding="utf-8") as lf:
+            lf.write(f"{time.strftime('%H:%M:%S')}  " + (f"Edits checked in {Path(a.batch).stem}" if editing else
+                     f"Translated part {res['done_batches']} of {res['total_batches']}") + "\n")
+    print(json.dumps(res, indent=1, ensure_ascii=False))
+    return 0 if res["ok"] else 2
+
+
+def cmd_tr_terms(a):
+    """Checks the agreed term list Claude wrote (tr/terms.json) and merges the client glossary into it."""
+    from beta import quality
+    from beta.progress import Progress
+    run_dir = _tr_dir(a)
+    meta = json.loads((run_dir / "run.json").read_text())
+    try:
+        res = quality.check_terms(run_dir, meta.get("options") or {})
+    except quality.QualityError as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+        return 1
+    if res["ok"]:
+        Progress(run_dir).phase("translate")
+        with (run_dir / "log.txt").open("a", encoding="utf-8") as lf:
+            lf.write(f"{time.strftime('%H:%M:%S')}  Term list agreed: {res['terms']} terms\n")
+    print(json.dumps(res, indent=1, ensure_ascii=False))
+    return 0 if res["ok"] else 2
+
+
+def cmd_tr_review(a):
+    """Keeps the first draft and writes review.txt (reading order, with flags) for the editing pass."""
+    from beta import quality
+    from beta.progress import Progress
+    run_dir = _tr_dir(a)
+    meta = json.loads((run_dir / "run.json").read_text())
+    try:
+        res = quality.review(run_dir, meta.get("options") or {})
+    except quality.QualityError as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+        return 1
+    Progress(run_dir).phase("edit")
+    with (run_dir / "log.txt").open("a", encoding="utf-8") as lf:
+        lf.write(f"{time.strftime('%H:%M:%S')}  First draft done; editing pass on {res['texts']} texts ({res['flagged']} flagged)\n")
+    print(json.dumps({"ok": True, **res}, indent=1, ensure_ascii=False))
+    return 0
+
+
+def cmd_tr_apply(a):
+    """Writes the translated SB, the English–target review workbook, results.json and base64 parts for upload."""
+    import base64
+    import datetime as dt
+    from beta import translate
+    from beta.progress import Progress
+    run_dir = _tr_dir(a)
+    meta = json.loads((run_dir / "run.json").read_text())
+    opts = meta.get("options") or {}
+    pr = Progress(run_dir)
+    pr.phase("write")
+    data = json.loads((run_dir / "tr" / "segments.json").read_text())
+    fmt = data["format"]
+    from beta import langs
+    opts = {**opts, "lang": data.get("lang") or langs.code_of(opts)}
+    lang = langs.code_of(opts)
+    L = langs.get(lang)
+    stem = re.sub(r"[^\w.-]+", "_", Path(meta["name"]).stem)
+    stem = re.sub(r"(?i)[_ -]*(english|eng|en)$", "", stem) or stem
+    out = run_dir / "out" / f"{stem}_{L['name']}.{fmt}"
+    try:
+        info = translate.apply(run_dir, out, opts)
+    except translate.TranslateError as e:
+        print(json.dumps({"status": "failed", "error": str(e)}))
+        return 1
+    rows = translate.review_rows(run_dir)
+    review = run_dir / "out" / f"{stem}_EN-{lang.upper()}_Review.xlsx"
+    meta_r = {"name": meta["name"], "output_name": out.name, "date": dt.date.today().strftime("%d %b %Y")}
+    from beta import quality
+    terms = quality.load_terms(run_dir / "tr")
+    edited = len({r["u"] for r in rows if r.get("draft") is not None})
+    translate.build_review_xlsx(rows, meta_r, info["warnings"], review, translate._font_for(opts), lang, terms)
+    # the text of the translated SB as stage 2 will read it (proves the file opens and reads back)
+    from beta import storyboard
+    try:
+        back = storyboard.read_text(out)
+        readable = len(langs.script_re(lang).findall(back))
+    except Exception as e:  # noqa: BLE001
+        readable = 0
+        info["warnings"].append({"where": "Whole file", "en": "", "hi": "", "problem": f"The {L['name']} file could not be read back: {e}"})
+    results = {"kind": "translate", "lang": lang, "language": L["name"], "rtl": L["rtl"], "format": fmt,
+               "source": meta["name"], "output_name": out.name,
+               "review_name": review.name, "counts": {"segments": len(rows), "translated": info["translated_texts"],
+               "kept": info["kept_texts"], "changed": info["changed"], "to_check": len(info["warnings"]),
+               "terms": len(terms), "edited": edited,
+               "script_chars": readable}, "rows": rows, "terms": terms, "warnings": info["warnings"], "finished_at": time.time()}
+    res_file = run_dir / "results_upload.json"
+    res_file.write_text(json.dumps(results, ensure_ascii=False))
+
+    def split(path, prefix):
+        raw = path.read_bytes()
+        parts = []
+        for i in range(0, max(len(raw), 1), 14 * 1024 * 1024):
+            pp = run_dir / f"{prefix}{len(parts) + 1}.txt"
+            pp.write_text(base64.b64encode(raw[i:i + 14 * 1024 * 1024]).decode())
+            parts.append(str(pp))
+        return parts
+    pr.phase("upload")
+    with (run_dir / "log.txt").open("a", encoding="utf-8") as lf:
+        lf.write(f"{time.strftime('%H:%M:%S')}  {L['name']} storyboard written: {out.name}\n")
+    print(json.dumps({"status": "ok", "lang": lang, "results_file": str(res_file), "out_file": str(out), "out_name": out.name,
+                      "out_parts": split(out, "out_part"), "review_file": str(review), "review_name": review.name,
+                      "review_parts": split(review, "review_part"), "counts": results["counts"]}, indent=1, ensure_ascii=False))
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="beta.cli")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -922,7 +1087,19 @@ def main(argv=None):
     q = sub.add_parser("progress")
     q.add_argument("--work", required=True)
     q.add_argument("--id", required=True)
-    q.add_argument("--step", choices=["prepare", "review", "report", "upload", "done"])
+    q.add_argument("--step", choices=["prepare", "review", "report", "upload", "done", "terms", "translate", "edit", "write"])
+    q = sub.add_parser("tr-extract")
+    for k in ("--work", "--id", "--upload"):
+        q.add_argument(k, required=True)
+    q.add_argument("--name")
+    q.add_argument("--options")
+    q = sub.add_parser("tr-check")
+    for k in ("--work", "--id", "--batch"):
+        q.add_argument(k, required=True)
+    for nm in ("tr-terms", "tr-review", "tr-apply"):
+        q = sub.add_parser(nm)
+        for k in ("--work", "--id"):
+            q.add_argument(k, required=True)
     q = sub.add_parser("check-env")
     q.add_argument("--manifest")
     q = sub.add_parser("checkpoint-save")
@@ -935,7 +1112,8 @@ def main(argv=None):
     a = p.parse_args(argv)
     return {"run": cmd_run, "progress": cmd_progress, "check-env": cmd_check_env, "merge": cmd_merge, "bundle": cmd_bundle,
             "report": cmd_report, "finalize": cmd_finalize, "checkpoint-save": cmd_checkpoint_save,
-            "checkpoint-restore": cmd_checkpoint_restore}[a.cmd](a) or 0
+            "checkpoint-restore": cmd_checkpoint_restore, "tr-extract": cmd_tr_extract, "tr-check": cmd_tr_check,
+            "tr-terms": cmd_tr_terms, "tr-review": cmd_tr_review, "tr-apply": cmd_tr_apply}[a.cmd](a) or 0
 
 
 if __name__ == "__main__":

@@ -161,7 +161,7 @@ def speech_seconds(path):
     return sum(b - a for a, b in speech_regions(path))
 
 
-def transcribe(path):
+def transcribe(path, lang="en"):
     """Returns [(start, end, text)] segments."""
     eng = config.STT_ENGINE.lower()
     if eng == "none":
@@ -178,7 +178,7 @@ def transcribe(path):
     if _whisper is None:
         _whisper = WhisperModel(config.WHISPER_MODEL, device=config.WHISPER_DEVICE,
                                 compute_type="float16" if config.WHISPER_DEVICE == "cuda" else "int8")
-    segs, _ = _whisper.transcribe(str(path), beam_size=5, vad_filter=False, language="en")
+    segs, _ = _whisper.transcribe(str(path), beam_size=5, vad_filter=False, language=lang or None)
     return [(s.start, s.end, s.text.strip()) for s in segs]
 
 
@@ -210,10 +210,15 @@ def caption_frame(video, t, text, out, width=1366):
     else:
         im = Image.new("RGB", (width, round(width * 9 / 16)), (20, 20, 20))
     W, H = im.size
+    from .langs import draw_font   # the caption's own script (Indian languages, Urdu, Arabic); DejaVu Sans for English
+    fp, rtl = draw_font(text)
     try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", max(18, W // 45))
+        font = ImageFont.truetype(fp, max(18, W // 45))
     except OSError:
-        font = ImageFont.load_default()
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", max(18, W // 45))
+        except OSError:
+            font = ImageFont.load_default()
     d = ImageDraw.Draw(im, "RGBA")
     space = d.textlength(" ", font=font)
     maxw = W * 0.86
@@ -233,8 +238,16 @@ def caption_frame(video, t, text, out, width=1366):
     words = []
     for i, ln in enumerate(lines):
         lw = sum(x[1] for x in ln) + space * (len(ln) - 1)
-        x = (W - lw) / 2
         y = top + 8 + i * lh
+        if rtl:   # Urdu / Arabic: words run from the right edge of the line
+            x = (W + lw) / 2
+            for w, ww in ln:
+                x -= ww
+                d.text((x, y), w, font=font, fill=(255, 255, 255), direction="rtl")
+                words.append({"w": w, "n": 0, "b": [x, y, ww, font.size * 1.15]})
+                x -= space
+            continue
+        x = (W - lw) / 2
         for w, ww in ln:
             d.text((x, y), w, font=font, fill=(255, 255, 255))
             words.append({"w": w, "n": 0, "b": [x, y, ww, font.size * 1.15]})

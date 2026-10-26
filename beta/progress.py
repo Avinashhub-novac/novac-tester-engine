@@ -29,6 +29,8 @@ LABELS = {
     "buttons": "Opening and closing every clickable", "assessment": "Testing the assessment", "mobile": "Testing on mobile", "analyse": "Collecting results",
     "video": "Checking the video", "review": "Reviewing text and storyboard", "report": "Making screenshots and report",
     "upload": "Saving the report to the site", "sb": "Reviewing the storyboard",
+    "terms": "Agreeing the term list", "translate": "Translating", "edit": "Editing pass (native reviewer)",
+    "write": "Writing the translated storyboard",
 }
 
 
@@ -155,3 +157,9 @@ def plan_sb(pages, picture_pages):
     """SB stage: almost all the time is Claude reading the storyboard."""
     return [("extract", 20 + pages * 1.5), ("analyse", 10), ("review", 120 + pages * 25 + picture_pages * 10),
             ("report", 20 + pages * 2), ("upload", 40 + pages * 2)]
+
+
+def plan_translate(words, batches):
+    """Localize, step 1: term list, first draft part by part, editing pass; writing and uploading are quick."""
+    return [("extract", 20), ("terms", 60 + words * 0.01), ("translate", 60 + words * 0.16 + batches * 20),
+            ("edit", 90 + words * 0.12), ("write", 30), ("upload", 60)]

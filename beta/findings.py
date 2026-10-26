@@ -15,6 +15,7 @@ CHECKS = [
     ("restrictions", "Restrictions (SOW)"),
     ("completion", "Completion"),
     ("content", "Content mapping (SB)"),
+    ("translation", "Translation (left in English)"),
     ("video", "Video"),
     ("assessment", "Assessment"),
     ("interactivity", "Clickables & pop-ups"),

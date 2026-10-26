@@ -50,6 +50,23 @@ SCOPE = {
     ],
 }
 
+SCOPE["localized"] = [
+    ("Content matched with the translated SB: on-screen text, titles, captions, missing / extra / reordered screens", ["content"]),
+    ("English left untranslated on screen", ["translation"]),
+    ("Spelling and grammar in the course language: on-screen text, titles, captions and transcript", ["spelling", "grammar"]),
+    ("Navigation of every screen: Next, Back and menu", ["navigation", "menu"]),
+    ("Screen numbers", ["screen_number"]),
+    ("Transcript and captions", ["transcript"]),
+]
+
+LOCALIZED_VIDEO_SCOPE = [
+    ("Video plays; picture and sound", ["video"]),
+    ("Captions present, in time with the narration", ["transcript"]),
+    ("Captions matched with the translated SB", ["content"]),
+    ("English left untranslated in the captions", ["translation"]),
+    ("Spelling and grammar in the course language", ["spelling", "grammar"]),
+]
+
 VIDEO_SCOPE = [
     ("Video plays; picture and sound", ["video"]),
     ("Captions present, in time with the narration", ["transcript"]),
@@ -60,7 +77,7 @@ VIDEO_SCOPE = [
 
 def items(stage, kind=""):
     if kind == "video":
-        return VIDEO_SCOPE
+        return LOCALIZED_VIDEO_SCOPE if stage in ("localized", "hindi") else VIDEO_SCOPE
     return SCOPE.get(stage or "beta", SCOPE["beta"])
 
 

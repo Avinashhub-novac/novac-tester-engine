@@ -39,6 +39,29 @@ reviewer understands at a glance, e.g. "Title is different from the SB", "Last s
 screen", "Word spelled wrong". Short sentences. No technical terms (no "OST string", "trigger", "object", "node",
 "slide ID") unless they are needed to find the problem.
 
+## Localize (only when tasks.language is set)
+The course is a TRANSLATED course in the language tasks.language_name (script tasks.script; right to left when
+tasks.rtl is true), and its storyboard is the translated SB. These rules replace the English-only parts of proofread
+and sb_compare; everything else above still applies (one issue per entry, report each problem once, copy text exactly,
+simple English for every text you write).
+- proofread: check every item in that language. Report spelling mistakes (wrong or missing vowel signs, wrong letters,
+  wrong nukta / anusvara / virama / chillu, Arabic look-alike letters ي ك ه used in Urdu, typos, doubled words) as
+  "spelling"; MAJOR grammar errors (gender / number agreement, wrong verb form or case ending, wrong postposition,
+  missing or extra words, broken sentences, mixing respectful and informal address) as "grammar"; clearly wrong
+  punctuation (a full body-text sentence without the language's end mark: "।" in Hindi and Punjabi, "۔" in Urdu, "."
+  in the other languages; doubled punctuation) as "punctuation". Report English words or sentences left untranslated
+  on screen as category "untranslated" (severity "error" for a sentence, "warning" for a single word); never report
+  words listed in tasks.keep_in_english or the glossary, brand and product names, acronyms, file names, variables, or
+  common English words that the translated SB itself also uses in English. Report phrasing a native learner would
+  clearly notice as word-for-word translation (English word order, literal idioms) as "grammar", severity "warning",
+  with "explanation" starting "Reads like a word-for-word translation" and a natural suggestion – only clear cases.
+  For Urdu and Arabic, text shown left to right (letters not joined, words in the wrong order) is a "grammar" error
+  with "explanation" "Text is shown left to right". Do not apply the English US/UK rule.
+- sb_compare: compare the course with the TRANSLATED SB in the same language, word for word, as described in
+  sb_compare (full mapping, not "vo_only"). The SB's labels and developer notes are often still in English: ignore
+  them. Text still in English on screen where the SB has the translation is reported here as "Not as per SB" with
+  found_in "OST" or "Slide Title".
+
 ## proofread
 If tasks.mode is "gold" (Gold / Showstopper stage), report ONLY major mistakes: clear spelling mistakes and grammar
 errors that change the meaning or look unprofessional; no punctuation, casing or style. tasks.english ("us" or "uk")

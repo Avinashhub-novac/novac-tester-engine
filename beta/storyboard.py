@@ -112,12 +112,12 @@ def read_text(path: Path) -> str:
 
 # ---------------------------------------------------------------- page pictures (for "Not as per SB" evidence)
 DPI = 150
-WORD_RE = re.compile(r"[\w'’‘]+")
+WORD_RE = re.compile(r"[\w'’‘\u0900-\u097f\u0a00-\u0a7f\u0b80-\u0bff\u0c00-\u0cff\u0d00-\u0d7f\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]+")
 
 
 def _norm(w):
     """Words compare without case and apostrophes (You’ve = You've = youve)."""
-    return re.sub(r"[^\w]+", "", w.lower())
+    return re.sub(r"[^\w\u0900-\u097f\u0a00-\u0a7f\u0b80-\u0bff\u0c00-\u0cff\u0d00-\u0d7f\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]+", "", w.lower())
 
 
 def _render_pdf(pdf, out_dir: Path, prefix, max_pages):
@@ -139,7 +139,10 @@ def _render_pdf(pdf, out_dir: Path, prefix, max_pages):
         words = []
         for m in re.finditer(r'<word xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" yMax="([\d.]+)">(.*?)</word>', body):
             x0, y0, x1, y1 = (float(m.group(i)) * k for i in range(1, 5))
-            words.append([html.unescape(m.group(5)), round(x0, 1), round(y0, 1), round(x1 - x0, 1), round(y1 - y0, 1)])
+            t = html.unescape(m.group(5))
+            if ARABIC.search(t):   # pdftotext gives right-to-left words in visual order: read them back
+                t = t[::-1]
+            words.append([t, round(x0, 1), round(y0, 1), round(x1 - x0, 1), round(y1 - y0, 1)])
         pages[str(n)] = words
     return pages
 
@@ -235,7 +238,21 @@ def _box(sel):
     return [x0, y0, x1 - x0, y1 - y0]
 
 
+ARABIC = re.compile("[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]")
+
+
 def find_on_pages(words_by_page, text, page_hint=None):
+    """Right-to-left (Urdu, Arabic) lines are stored word by word from the right edge, so both word orders are tried."""
+    best = _find_on_pages(words_by_page, text, page_hint)
+    if ARABIC.search(text or ""):
+        rev = " ".join(reversed(WORD_RE.findall(text or "")))
+        alt = _find_on_pages(words_by_page, rev, page_hint)
+        if alt[2] > best[2]:
+            return alt
+    return best
+
+
+def _find_on_pages(words_by_page, text, page_hint=None):
     """The SB page and box that best match `text` (the SB wording quoted in an issue).
     Returns (page number, [x, y, w, h] or None, score 0..1). The page the issue names wins whenever the words are there."""
     if not [w for w in WORD_RE.findall(text or "") if _norm(w)]:
