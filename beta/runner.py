@@ -23,6 +23,13 @@ class Run:
             opts["swipe"] = False
         elif opts.get("stage") == "beta":
             opts["transcript"] = True
+        self.custom = None
+        if opts.get("stage") == "custom":   # Custom: only the ticked checks run (all of them when none are given)
+            from .scope import CUSTOM_KEYS
+            self.custom = set(opts.get("checks") or CUSTOM_KEYS)
+            c = self.custom
+            opts.update(swipe="swipe" in c, transcript="transcript" in c, buttons="buttons" in c,
+                        menu="navigation" in c, prev="navigation" in c, assessment="assessment" in c)
         self.col = Collector()
         # work handed to the Claude session that runs this engine (LANGUAGE_MODE=export)
         self.shot_boxes = {}
@@ -93,9 +100,9 @@ class Run:
         """SB and Alpha: the team's style guide (Word, PDF, PowerPoint or a picture) for the reviewer to test against."""
         sg = self.meta.get("styleguide")
         stage = (self.meta.get("options") or {}).get("stage", "beta")
-        if not sg or stage not in ("sb", "alpha"):
+        if not sg or stage not in ("sb", "alpha", "custom") or (self.custom is not None and "style_guide" not in self.custom):
             if sg:
-                self.log("Style guide not used: it applies to the SB and Alpha stages only")
+                self.log("Style guide not used: it applies to the SB and Alpha stages (and Custom when ticked) only")
             return
         path = self.dir / sg
         out = self.dir / "styleguide"
@@ -192,7 +199,8 @@ class Run:
         stage = opts.get("stage", "beta")
         gold = stage == "gold"
         passes = [p for p in ("desktop", "restrict", "prev", "menu", "buttons", "assessment", "mobile") if opts.get(p, True)]
-        wants_restrict = stage in ("beta", "gold") and any(v in ("restricted", "free") for v in (opts.get("expect") or {}).values())
+        wants_restrict = stage in ("beta", "gold", "custom") and any(v in ("restricted", "free") for v in (opts.get("expect") or {}).values()) \
+            and (self.custom is None or "restrictions" in self.custom)
         if not wants_restrict:
             passes.remove("restrict")
         if gold:   # Gold / Showstopper: functionality only (navigation, the assessment, restrictions as per SOW)
@@ -213,7 +221,8 @@ class Run:
                           max_minutes=limit, log=self.log, max_buttons=config.MAX_BUTTONS_PER_SLIDE)
         crawler.expect = opts.get("expect") or {}
         beta = opts.get("stage", "beta") == "beta"
-        crawler.check_completion = beta or gold   # Beta: completion; Gold: the assessment result sent to the LMS
+        custom_comp = self.custom is not None and "completion" in self.custom
+        crawler.check_completion = beta or gold or custom_comp   # Beta / Custom: completion; Gold: the assessment result sent to the LMS
         if not opts.get("swipe", True) and "mobile" in passes:
             passes.remove("mobile")
         from .progress import plan_scorm
@@ -266,8 +275,9 @@ class Run:
 
         # ---- completion reported to the LMS
         comp = crawler.completion
-        if not beta:
-            self.col.skip("completion", "Alpha review: completion status is checked in Beta only")
+        if not (beta or custom_comp):
+            self.col.skip("completion", "Not ticked for this test" if self.custom is not None else
+                          "Alpha review: completion status is checked in Beta only")
         elif comp and "error" not in comp:
             self.col.ran("completion")
             shot = comp.get("panel_shot", "")
@@ -339,15 +349,21 @@ class Run:
                                   "text": txt, **extra})
         if not opts.get("transcript", True):
             items = [i for i in items if i["source"] not in ("captions", "transcript")]
+        if self.custom is not None and "language" not in self.custom:   # Custom: on-screen text only when ticked
+            items = [i for i in items if i["source"] in ("captions", "transcript")]
         self.proofread(items, lambda it: it.get("slide", ""))
         if localized:
             self.localize_task()
         else:
             self.english_check(course, visits, opts.get("english", "auto"))
-        if opts.get("stage") == "alpha":   # Alpha: every screen is reviewed in full, with its screenshot
+        if opts.get("stage") == "alpha" or (self.custom is not None and self.custom & {"logic", "consistency", "visual"}):
+            # Alpha (and Custom when ticked): every screen is reviewed in full, with its screenshot
             for c in ("logic", "consistency", "visual"):
                 self.col.ran(c)
             self.tasks["course_title"] = course.title
+            if self.custom is not None:   # Custom: only the areas that were ticked
+                self.tasks["logic_areas"] = sorted(self.custom & {"logic", "consistency", "visual"}) + \
+                    (["assessment"] if "assessment" in self.custom else [])
             self.tasks["logic_check"] = [dict({"slide_id": s.id, "label": s.label, "position": n + 1, "title": s.title,
                                                "text": "\n".join(s.texts),
                                                "transcript": visits.get(s.id, {}).get("transcript_text") or s.notes,
@@ -617,7 +633,9 @@ class Run:
         """Hands the storyboard text and the course content to Claude for screen-by-screen mapping."""
         sb = self.meta.get("storyboard")
         if not sb:
-            if self.meta.get("options", {}).get("stage") in ("alpha", "localized", "hindi"):  # the SB is a must for Alpha and Localize
+            if self.meta.get("options", {}).get("stage") in ("alpha", "localized", "hindi") or \
+                    (self.custom is not None and "content" in self.custom):
+                # the SB is a must for Alpha and Localize (and for Custom when "Content vs SB" is ticked)
                 self.col.add("content", "error", "Storyboard not uploaded: content could not be matched with the SB",
                              detail="Upload the course again together with its storyboard.")
             else:

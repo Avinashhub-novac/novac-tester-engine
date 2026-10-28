@@ -99,9 +99,10 @@ def _save(run_dir, res):
         meta = {}
     stage = res.get("stage") or (meta.get("options") or {}).get("stage") or "beta"
     kind = meta.get("kind", "")
-    scope.apply(res, stage, kind)   # nothing outside the stage's scope is ever reported
+    sel = (meta.get("options") or {}).get("checks")
+    scope.apply(res, stage, kind, sel)   # nothing outside the stage's scope (or the ticked checks) is ever reported
     res["summary"] = summarize(res["findings"], set(res.get("checks_run", [])), res.get("checks_skipped", {}))
-    scope.apply(res, stage, kind)   # the checklist for the result page, from the final summary
+    scope.apply(res, stage, kind, sel)   # the checklist for the result page, from the final summary
     (run_dir / "results.json").write_text(json.dumps(res, indent=1, ensure_ascii=False))
 
 

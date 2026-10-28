@@ -67,6 +67,33 @@ LOCALIZED_VIDEO_SCOPE = [
     ("Spelling and grammar in the course language", ["spelling", "grammar"]),
 ]
 
+# Custom stage: the team picks any of these checks (all ticked by default). key -> (label, checks)
+CUSTOM = [
+    ("navigation", "Navigation of every screen: Next, Back and menu", ["navigation", "menu"]),
+    ("buttons", "Every visible clickable opened and closed; pop-ups; overlapping text; Next only after all items", ["buttons", "interactivity"]),
+    ("assessment", "Assessment: every option, feedback, pass / fail / retry, attempts; rules match the results; numbering; right answers", ["assessment"]),
+    ("screen_number", "Screen numbers", ["screen_number"]),
+    ("seekbar", "Seekbar", ["seekbar"]),
+    ("language", "Spelling and grammar in on-screen text and titles; US/UK English", ["spelling", "grammar"]),
+    ("transcript", "Transcript and captions: present, spelling and grammar, captions vs transcript", ["transcript"]),
+    ("content", "Content matched with the SB: on-screen text, titles, VO, screen order (needs the SB)", ["content"]),
+    ("logic", "Logic, facts and flow: steps and screens in order, recap matches the content, right course name", ["logic"]),
+    ("consistency", "Consistency: casing, end punctuation, parallel lists, instructions and buttons; titles and OST fit the VO", ["consistency"]),
+    ("visual", "Images fit their screen; text fits its box and does not run into pictures", ["visual"]),
+    ("restrictions", "Restrictions as per SOW: menu, seekbar, Next", ["restrictions"]),
+    ("swipe", "Mobile: swipe next and previous on an iPhone (landscape)", ["swipe"]),
+    ("completion", "LMS course completion", ["completion"]),
+    ("style_guide", "Style guide followed (needs the style guide)", ["style_guide"]),
+]
+CUSTOM_KEYS = [k for k, _, _ in CUSTOM]
+
+
+def custom_items(selected):
+    """The scope of a Custom test: only the checks that were ticked (all of them when none are given)."""
+    sel = set(selected or CUSTOM_KEYS)
+    return [(label, checks) for k, label, checks in CUSTOM if k in sel]
+
+
 VIDEO_SCOPE = [
     ("Video plays; picture and sound", ["video"]),
     ("Captions present, in time with the narration", ["transcript"]),
@@ -75,19 +102,25 @@ VIDEO_SCOPE = [
 ]
 
 
-def items(stage, kind=""):
+def items(stage, kind="", selected=None):
+    if stage == "custom":
+        its = custom_items(selected)
+        if kind == "video":   # a video has no screens: only what applies to it
+            vid = {c for _, cs in VIDEO_SCOPE for c in cs}
+            its = [VIDEO_SCOPE[0]] + [(l, cs) for l, cs in its if set(cs) & vid]
+        return its
     if kind == "video":
         return LOCALIZED_VIDEO_SCOPE if stage in ("localized", "hindi") else VIDEO_SCOPE
     return SCOPE.get(stage or "beta", SCOPE["beta"])
 
 
-def allowed(stage, kind=""):
-    return {c for _, cs in items(stage, kind) for c in cs}
+def allowed(stage, kind="", selected=None):
+    return {c for _, cs in items(stage, kind, selected) for c in cs}
 
 
-def apply(res, stage, kind=""):
+def apply(res, stage, kind="", selected=None):
     """Drops out-of-scope findings and returns the scope checklist for the result page."""
-    ok = allowed(stage, kind)
+    ok = allowed(stage, kind, selected)
     kept, dropped = [], 0
     for f in res.get("findings", []):
         if f.get("check") in ok or f.get("blocker"):
@@ -99,7 +132,7 @@ def apply(res, stage, kind=""):
         res["out_of_scope_dropped"] = res.get("out_of_scope_dropped", 0) + dropped
     summary = res.get("summary") or {}
     out = []
-    for label, checks in items(stage, kind):
+    for label, checks in items(stage, kind, selected):
         st = [summary.get(c, {}).get("status", "n/a") for c in checks]
         n_err = sum(1 for f in kept if f.get("check") in checks and f.get("severity") == "error")
         n_warn = sum(1 for f in kept if f.get("check") in checks and f.get("severity") == "warning")

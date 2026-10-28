@@ -114,7 +114,7 @@ page N ===" marker above it; omit if unknown), "course_says": exact course text 
 "suggestion": what needs to be done, in one short plain sentence, "explanation": one short plain sentence}.
 
 ## logic_check
-Only if tasks.logic_check is not empty (Alpha: the course is reviewed screen by screen, in full). Each item is one
+Only if tasks.logic_check is not empty (Alpha, or a Custom test: the course is reviewed screen by screen, in full). Each item is one
 screen in course order ("position"), with its title, on-screen text ("text"), narration ("transcript") and a
 screenshot ("shot", a picture file in the run folder – open it with the Read tool; at most 80 screens). Question
 screens also list their answer options and which one the course marks as correct ("marked_correct").
@@ -122,6 +122,7 @@ tasks.course_title is the course's name. Go through the screens from the first t
 problems below, then check the rules that need the whole course (consistency, order, recap, assessment). Report each
 problem once, on the first screen where it is (name the others in "explanation"). Do not report spelling and grammar
 (proofread does that), US/UK spelling (the engine does that) or differences from the SB (sb_compare does that).
+If tasks.logic_areas is given (a Custom test), check and report only those areas; otherwise check all four.
 Every entry has an "area":
 - "logic": contradictions within a screen or between screens; wrong facts or definitions; wrong calculations,
   percentages or numbers that do not add up; cause and effect that does not hold; steps or instructions in the wrong

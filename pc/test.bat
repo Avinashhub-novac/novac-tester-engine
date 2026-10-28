@@ -11,8 +11,18 @@ if "%~1"=="" (
 )
 echo.
 set STAGE=beta
-set /p STAGE= Stage - beta, alpha, gold or sb  [press Enter for beta]: 
+set /p STAGE= Stage - beta, alpha, gold, sb or custom  [press Enter for beta]: 
+set CHECKS=
+if /i "%STAGE%"=="custom" (
+  echo  Checks: navigation, buttons, assessment, screen_number, seekbar, language, transcript, content,
+  echo          logic, consistency, visual, restrictions, swipe, completion, style_guide
+  set /p CHECKS= Checks to run, separated by commas  [press Enter for all]: 
+)
 echo.
-python -X utf8 -m beta.local test %* --stage %STAGE%
+if defined CHECKS (
+  python -X utf8 -m beta.local test %* --stage %STAGE% --checks "%CHECKS%"
+) else (
+  python -X utf8 -m beta.local test %* --stage %STAGE%
+)
 echo.
 pause

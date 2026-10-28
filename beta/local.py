@@ -108,6 +108,15 @@ def _options(stage, kind, a):
         o = {"stage": "gold", "play_full": True, "swipe": False, "buttons": False, "transcript": False}
         if kind == "scorm":
             o["expect"] = {"menu": a.menu, "seekbar": a.seekbar, "next": a.next}
+    if stage == "custom":   # only the ticked checks (--checks), all of them when none are named
+        from beta.scope import CUSTOM_KEYS
+        sel = [c.strip() for c in (a.checks or "").split(",") if c.strip()] or list(CUSTOM_KEYS)
+        bad = [c for c in sel if c not in CUSTOM_KEYS]
+        if bad:
+            raise SystemExit(f"Unknown check(s): {', '.join(bad)}. Choose from: {', '.join(CUSTOM_KEYS)}")
+        o = {"stage": "custom", "checks": sel, "play_full": not a.quick, "english": a.english}
+        if kind == "scorm" and "restrictions" in sel:
+            o["expect"] = {"menu": a.menu, "seekbar": a.seekbar, "next": a.next}
     if kind == "sb":
         o = {"stage": "sb", "english": a.english, "requirements": (a.requirements or "")[:2000]}
     return o
@@ -436,7 +445,10 @@ def main(argv=None):
     t.add_argument("--sb", help="storyboard (Word / PowerPoint / PDF)")
     t.add_argument("--styleguide", help="style guide for SB / Alpha (Word, PDF, PowerPoint or a picture)")
     t.add_argument("--captions", help="captions file for a video (.srt / .vtt)")
-    t.add_argument("--stage", default="beta", choices=["beta", "alpha", "gold", "sb"])
+    t.add_argument("--stage", default="beta", choices=["beta", "alpha", "gold", "sb", "custom"])
+    t.add_argument("--checks", default="", help="custom stage: the checks to run, separated by commas (default: all): "
+                   "navigation, buttons, assessment, screen_number, seekbar, language, transcript, content, logic, "
+                   "consistency, visual, restrictions, swipe, completion, style_guide")
     t.add_argument("--english", default="us", choices=["us", "uk"])
     t.add_argument("--menu", default="restricted", choices=["restricted", "free", "skip"])
     t.add_argument("--next", default="restricted", choices=["restricted", "free", "skip"])
