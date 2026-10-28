@@ -27,6 +27,25 @@ only for the content review: spelling, grammar and the storyboard (SB).
 
 Keep Google Chrome on the same version for every test, so every report is made the same way.
 
+## PCs without internet (offline kit)
+
+1. On one PC **with** internet (Windows 10 or 11, with Python 3.13 installed), double-click **pc\make_offline_kit.bat**.
+   It downloads into `pc\offline_kit` (about 700 MB):
+   - the Python 3.13 installer
+   - Google Chrome
+   - LibreOffice
+   - Poppler
+   - FFmpeg
+   - every Python package the tester needs
+2. Copy the whole tester folder, including `pc\offline_kit`, to the other PCs (USB drive or network share).
+3. On each PC, double-click **pc\setup.bat**. It finds the kit and installs everything from it, with no internet:
+   - Python and the Python packages are installed for the user.
+   - Poppler and FFmpeg are unpacked into `%LOCALAPPDATA%\QC360\tools`.
+   - Google Chrome and LibreOffice are installed from their MSI files; Windows asks for administrator rights for these two.
+
+If `make_offline_kit.bat` says winget is not available, it lists the download pages: save each installer into `pc\offline_kit`
+by hand, then run it again for the Python packages.
+
 ## Test a course
 
 1. In Explorer, select the course zip and its storyboard together. For SB and Alpha you can also add a style guide

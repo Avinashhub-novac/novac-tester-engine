@@ -5,6 +5,14 @@ echo.
 echo  QC360 AI - one-time set-up of this PC
 echo  ======================================
 echo.
+if exist "pc\offline_kit\" (
+  echo  Offline kit found: installing everything from pc\offline_kit ^(no internet needed^)
+  powershell -NoProfile -ExecutionPolicy Bypass -File "pc\offline_kit.ps1" -Install
+  echo.
+  echo  If something says MISSING, close this window, open it again and run setup.bat once more.
+  pause
+  exit /b
+)
 where python >nul 2>nul
 if errorlevel 1 (
   echo  Python is not installed.

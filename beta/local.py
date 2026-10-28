@@ -53,7 +53,10 @@ def _tool_dirs():
         if lad:
             pats += [rf"{lad}\Microsoft\WinGet\Packages\Gyan.FFmpeg*\ffmpeg-*\bin",
                      rf"{lad}\Microsoft\WinGet\Packages\oschwartz10612.Poppler*\poppler-*\Library\bin",
-                     rf"{lad}\Microsoft\WinGet\Links"]
+                     rf"{lad}\Microsoft\WinGet\Links",
+                     # unpacked by the offline kit (pc\offline_kit.ps1 -Install)
+                     rf"{lad}\QC360\tools\ffmpeg\ffmpeg-*\bin", rf"{lad}\QC360\tools\ffmpeg\bin",
+                     rf"{lad}\QC360\tools\poppler\poppler-*\Library\bin", rf"{lad}\QC360\tools\poppler\Library\bin"]
     else:
         pats += ["/opt/homebrew/bin", "/usr/local/bin", "/Applications/LibreOffice.app/Contents/MacOS"]
     extra = [p for p in (os.environ.get("EQC_TOOLS") or "").split(os.pathsep) if p]
