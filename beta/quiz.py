@@ -291,6 +291,7 @@ class QuizMixin:
                 gen = itertools.permutations(tg) if len(tg) == len(items) else itertools.product(tg, repeat=len(items))
                 combos = [None] + list(itertools.islice(gen, 64))   # None: first, the way a learner would (a wrong drop springs back)
                 q.drag_note = f"the right drop place of every item could not be found ({len(combos)} placements tried)"
+                fbs, tried = set(), 0
                 for combo in combos:
                     self.check_time()
                     self.fresh(page)
@@ -307,10 +308,18 @@ class QuizMixin:
                     if not combo:
                         want = {p["item_id"]: p["target_id"] for p in placed}
                     fb, _ = self.submit_answer(page)
+                    fbs.add(fb)
+                    tried += 1
+                    if tried >= 2 and fbs <= {"No feedback", "No Submit button"}:
+                        break   # no right / wrong feedback: trying more placements cannot tell which is right
                     if fb == "Correct":
                         q.drag_key, q.drag_note = want, ""
                         self.log(f"{q.label}: right drop places found by trying")
                         break
+                if not q.drag_key:
+                    if fbs and fbs <= {"No feedback", "No Submit button"}:
+                        q.drag_note = ("the question shows no right / wrong feedback after Submit, so the right drop place "
+                                       "of each item could not be found by trying")
         finally:
             ctx.close()
 
