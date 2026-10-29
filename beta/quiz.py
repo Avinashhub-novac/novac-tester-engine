@@ -57,9 +57,15 @@ def stated_rules(text):
         out["attempts"] = 0
     # the module's own instruction on retry / retake (shown in the report and compared after the last attempt)
     sents = [x.strip() for x in re.split(r"(?<=[.!?])\s+|\s{2,}|\n", raw) if x.strip()]
-    ins = [x for x in sents if re.search(r"\b(attempts?|retake|retry|try again|re-?attempt)\b", x, re.I)]
+    ins = []
+    for x in sents:
+        if re.search(r"\b(attempts?|retake|retry|try again|re-?attempt)\b", x, re.I) and x.rstrip(".") not in [y.rstrip(".") for y in ins]:
+            ins.append(x)
     if ins:
         out["instruction"] = " ".join(ins)[:300]
+    # "you will need to retake the assessment" with no number: the assessment can be taken again (no limit stated)
+    if "attempts" not in out and re.search(r"\b(retake|retry|re-?attempt|take)\b.{0,25}\b(assessment|quiz|test|exam)\b(?!.{0,15}\bcourse\b)", t):
+        out["retake_allowed"] = True
     return out
 
 
@@ -843,6 +849,8 @@ class QuizMixin:
         instr = rules.get("instruction") or ""
         says = (f"The rules screen says {n} attempt{'s' if n != 1 else ''}" if n else
                 "The rules screen says the attempts are unlimited" if n == 0 else "The rules screen does not state the number of attempts")
+        if n is None and rules.get("retake_allowed"):   # the instruction promises a retake, with no limit
+            n, says = 0, "The rules screen says the assessment can be taken again (no limit stated)"
         retry_steps = "On the results screen press Retry (or Retake), then answer every question wrong again."
         rows = [f"Retry – attempt {t}" for t in range(2, target + 1)]
         capped = bool(n) and n > target   # more than 10 attempts allowed: the first 10 are tested
@@ -916,7 +924,7 @@ class QuizMixin:
                         ("; Retake starts the course again, as the rules screen says." if self._retake_course_said(instr) else ".") +
                         (f" Rules screen: “{instr}”" if instr else ""))
         elif n == 0:
-            exp_last = f"Retry is still offered after attempt {target} (unlimited attempts)." + (f" Rules screen: “{instr}”" if instr else "")
+            exp_last = f"Retry is still offered after attempt {target} ({says[0].lower() + says[1:]})." + (f" Rules screen: “{instr}”" if instr else "")
         else:
             exp_last = f"{says}: what the results screen offers after attempt {target} is recorded." + (f" Rules screen: “{instr}”" if instr else "")
         if no_retry and n is None:
@@ -961,7 +969,7 @@ class QuizMixin:
                                    "actual": "Retry is still offered." if has else "No Retry is offered.",
                                    "result": "N/A" if ok is None else ("Pass" if ok else "Fail"), "shot": after_shot})
             if ok is False:
-                self.col.add("assessment", "error", "Retry is not offered although the attempts are unlimited", slide_id=r["end_sid"],
+                self.col.add("assessment", "error", "Retry is not offered although the rules screen allows more attempts", slide_id=r["end_sid"],
                              slide_label=self.label(r["end_sid"]), screenshot=after_shot, vw=1366, found_in="Assessment",
                              detail=f"No Retry after attempt {target}.", fix="Offer Retry after every attempt, as the rules screen says.")
         # number of attempts
