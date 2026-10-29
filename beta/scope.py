@@ -19,7 +19,7 @@ SCOPE = {
     "alpha": [
         ("Navigation of every screen: Next, Back, START and menu", ["navigation", "menu"]),
         ("Every visible clickable opened and closed; overlapping text; Next only after all items", ["buttons", "interactivity"]),
-        ("Assessment: every option, feedback, pass / fail / retry; rules match the results; numbering; right answers; on-topic questions", ["assessment"]),
+        ("Assessment: every option, feedback, scores 100 / 80 / 60 / 0%, every attempt (Retry, Retake); rules match the results; numbering; right answers; on-topic questions", ["assessment"]),
         ("Screen numbers", ["screen_number"]),
         ("Spelling and grammar in on-screen text and titles; US/UK English", ["spelling", "grammar"]),
         ("Content matched with the SB (on-screen text, titles, VO, screen order)", ["content"]),
@@ -32,7 +32,7 @@ SCOPE = {
     "beta": [
         ("Navigation of every screen: Next, Back and menu", ["navigation", "menu"]),
         ("Every visible clickable opened and closed; overlapping text; Next only after all items", ["buttons", "interactivity"]),
-        ("Assessment: every option, feedback, pass / fail / retry and attempts", ["assessment"]),
+        ("Assessment: every option, feedback, scores 100 / 80 / 60 / 0%, every attempt (Retry, Retake)", ["assessment"]),
         ("Screen numbers and seekbar", ["screen_number", "seekbar"]),
         ("Spelling and grammar in on-screen text, titles, transcript and captions", ["spelling", "grammar"]),
         ("Transcript and captions", ["transcript"]),
@@ -44,7 +44,7 @@ SCOPE = {
     "gold": [
         ("Major spelling and grammar mistakes", ["spelling", "grammar"]),
         ("Navigation of every screen: Next and Back", ["navigation"]),
-        ("Assessment scenarios and rules: options, pass, fail, retry, attempts, result sent to the LMS", ["assessment"]),
+        ("Assessment: options, scores 100 / 80 / 60 / 0%, every attempt (Retry, Retake), result sent to the LMS", ["assessment"]),
         ("LMS course completion", ["completion"]),
         ("Restrictions as per SOW: menu, seekbar, Next (when set)", ["restrictions"]),
     ],
@@ -71,7 +71,7 @@ LOCALIZED_VIDEO_SCOPE = [
 CUSTOM = [
     ("navigation", "Navigation of every screen: Next, Back and menu", ["navigation", "menu"]),
     ("buttons", "Every visible clickable opened and closed; pop-ups; overlapping text; Next only after all items", ["buttons", "interactivity"]),
-    ("assessment", "Assessment: every option, feedback, pass / fail / retry, attempts; rules match the results; numbering; right answers", ["assessment"]),
+    ("assessment", "Assessment: every option, feedback, scores 100 / 80 / 60 / 0%, every attempt (Retry, Retake); rules match the results; numbering; right answers", ["assessment"]),
     ("screen_number", "Screen numbers", ["screen_number"]),
     ("seekbar", "Seekbar", ["seekbar"]),
     ("language", "Spelling and grammar in on-screen text and titles; US/UK English", ["spelling", "grammar"]),

@@ -17,6 +17,7 @@ MUST_ANSWER_RE = re.compile(r"\b(must|please)\b.{0,40}\b(answer|select|choose|ma
 PASS_RE = re.compile(r"\b(passed|you pass|congratulations|well done|successfully)\b", re.I)
 FAIL_RE = re.compile(r"\b(failed|did not pass|didn'?t pass|not passed|unsuccessful|try again|retry|retake)\b", re.I)
 RETRY_RE = re.compile(r"^\s*(retry|retake|try again|retry (quiz|assessment)|retake (quiz|assessment))\s*$", re.I)
+SCORES = (100, 80, 60, 0)   # the fixed score plan of every assessment test (never changed)
 NUM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
              "unlimited": 0}
 
@@ -40,7 +41,8 @@ def assessment_parts(course):
 
 def stated_rules(text):
     """What a rules screen promises: number of questions, attempts and the pass mark."""
-    t = (text or "").lower()
+    raw = re.sub(r"\^%\^|%\^", "%", text or "")   # Storyline writes % as ^%^ in its text data
+    t = raw.lower()
     out = {}
     m = re.search(r"(\d+|" + "|".join(NUM_WORDS) + r")\s+(?:multiple[- ]choice\s+)?(?:questions|items)", t)
     if m:
@@ -51,6 +53,13 @@ def stated_rules(text):
     m = re.search(r"(\d{1,3})\s*(?:%|percent)", t)
     if m:
         out["pass_mark"] = int(m.group(1))
+    if "attempts" not in out and re.search(r"\b(unlimited|any number of)\s+(attempts?|tries)|\bas many times\b", t):
+        out["attempts"] = 0
+    # the module's own instruction on retry / retake (shown in the report and compared after the last attempt)
+    sents = [x.strip() for x in re.split(r"(?<=[.!?])\s+|\s{2,}|\n", raw) if x.strip()]
+    ins = [x for x in sents if re.search(r"\b(attempts?|retake|retry|try again|re-?attempt)\b", x, re.I)]
+    if ins:
+        out["instruction"] = " ".join(ins)[:300]
     return out
 
 
@@ -279,13 +288,11 @@ class QuizMixin:
         A = self.assessment = {"questions": [], "scenarios": [], "rules": {}, "pass_mark": None,
                                "rules_ids": [s.id for s in rules], "quiz_ids": [s.id for s in quiz],
                                "results_ids": [s.id for s in results], "layer_shots": {}}
-        A["rules"] = stated_rules(" ".join(" ".join(s.texts) for s in rules))
+        A["rules"] = stated_rules("\n".join("\n".join(s.texts) for s in rules))
         scoring = next((x for x in self.course.scorings if x.get("type") not in (None, "view")), None) or {}
         A["pass_mark"] = scoring.get("passPercent")
-        attempts = A["rules"].get("attempts")
-        cap = min(6, attempts + 1) if attempts else 3      # attempts played after the first failed one ends
         asked = self.course.asked(quiz)
-        runs = 1 + cap
+        runs = 4 + self.attempts_to_test(A["rules"])
         self._aprog = {"base": 0, "total": runs * asked + 2, "n": 0}
         rules_shot = ""
         if rules and self.goto_slide(page, rules[0].id) == rules[0].id:
@@ -355,6 +362,8 @@ class QuizMixin:
             return ok and here == sid
 
         def play(mode, run_no, retry_box=None):
+            # mode: the score this attempt aims at (100, 80, 60 or 0); the first questions asked are answered right
+            n_right = self.n_right(mode, asked)
             out = {"answers": [], "end_sid": "", "text": "", "shot": "", "lms": {}, "retry": None, "start_sid": "", "cleared": True}
             if retry_box:
                 self.click_box(page, retry_box)
@@ -387,9 +396,10 @@ class QuizMixin:
                     if not blank_submit(sid, q):
                         return None   # the blank answer was taken: start this attempt again
                 first_look(sid, q)
+                rt = len(out["answers"]) < n_right   # this question is answered right
                 if qinfo[sid]["kind"] == "drag":
-                    k = 0 if mode == "right" else 1
-                    placed, fb, text = self.answer_drag(page, sid, q, mode, run_no)
+                    k = 0 if rt else 1
+                    placed, fb, text = self.answer_drag(page, sid, q, "right" if rt else "wrong", run_no)
                     rec = qinfo[sid]["options"][k]
                     stuck = [p for p in placed if not p["moved"]]
                     if rec["selectable"] is None:
@@ -402,7 +412,7 @@ class QuizMixin:
                     if not rec["feedback"]:
                         rec["feedback"], rec["feedback_text"] = fb, text
                         rec["shot"] = self.shot(page, f"{sid}_fb{k}")
-                        want = "Correct" if mode == "right" else "Incorrect"
+                        want = "Correct" if rt else "Incorrect"
                         if fb in ("Correct", "Incorrect") and fb != want:
                             msg = "Right placement is marked as wrong" if want == "Correct" else "Wrong placement is accepted as right"
                             self.col.add("assessment", "error", msg, slide_id=sid, slide_label=q.label,
@@ -411,10 +421,10 @@ class QuizMixin:
                     out["answers"].append((sid, k, fb))
                     new = self.leave_feedback(page, sid)
                     if new == sid:
-                        placed = self.answer_drag(page, sid, q, mode, run_no + 1)[0]
+                        placed = self.answer_drag(page, sid, q, "right" if rt else "wrong", run_no + 1)[0]
                         new = self.leave_feedback(page, sid)
                         if new == sid:
-                            if mode == "wrong" and not all(p["placed"] for p in placed):
+                            if not rt and not all(p["placed"] for p in placed):
                                 # the tester could not lay out a full wrong answer, so Submit never opened: not a course error
                                 out["blocked"] = (f"the tester could not place every item of {q.label} on a wrong target "
                                                   f"({sum(p['placed'] for p in placed)} of {len(placed)} placed), so the question could not be submitted")
@@ -426,9 +436,13 @@ class QuizMixin:
                     continue
                 right = [k for k, c in enumerate(q.choices) if c["correct"]]
                 wrong = [k for k, c in enumerate(q.choices) if not c["correct"]]
-                k = right[0] if mode == "right" or not wrong else wrong[run_no % len(wrong)]
-                i, _ = self._dom_index(page, q, k)
-                self.select_option(page, i if i is not None else 0)
+                k = right[0] if rt or not wrong else wrong[run_no % len(wrong)]
+                multi = rt and len(right) > 1   # select all that apply: every right option is ticked
+                if any(c.get("multi") for c in q.choices):
+                    self._clear_ticks(page)
+                for kk in (right if multi else [k]):
+                    i, _ = self._dom_index(page, q, kk)
+                    self.select_option(page, i if i is not None else 0)
                 fb, text = self.submit_answer(page)
                 rec = qinfo[sid]["options"][k]
                 if not rec["feedback"]:
@@ -448,7 +462,11 @@ class QuizMixin:
                 out["answers"].append((sid, k, fb))
                 new = self.leave_feedback(page, sid)
                 if new == sid:   # a second try on the same question: answer the same way again
-                    self.select_option(page, i if i is not None else 0)
+                    if any(c.get("multi") for c in q.choices):
+                        self._clear_ticks(page)
+                    for kk in (right if multi else [k]):
+                        i, _ = self._dom_index(page, q, kk)
+                        self.select_option(page, i if i is not None else 0)
                     self.submit_answer(page)
                     new = self.leave_feedback(page, sid)
                     if new == sid:
@@ -477,46 +495,14 @@ class QuizMixin:
             return out
 
         pm = A["pass_mark"] if A["pass_mark"] is not None else A["rules"].get("pass_mark")
-        r = play("right", 0)
-        if r is None:
-            r = play("right", 0)
-        if r:
-            self._judge(A, r, "All answers correct", "pass", pm, quiz)
-        r = play("wrong", 0)
-        if r:
-            self._judge(A, r, "All answers wrong", "fail", pm, quiz)
-        if r and r.get("retry") is not None and r["end_sid"] in A["results_ids"]:
-            tries = 1
-            while r.get("retry") and tries < cap:
-                tries += 1
-                r2 = play("wrong", tries - 1, retry_box=r["retry"])
-                landed_ok = self.is_first_question(r2.get("start_sid"), quiz)
-                if not landed_ok and self._retake_course(r, r2, tries, quiz):
-                    tries -= 1   # the attempts are used up: by design the button now starts the whole course again
-                    break
-                A["scenarios"].append({"name": f"Retry – attempt {tries}", "steps": "On the results screen press Retry.",
-                                       "expected": "The assessment starts again with no answers selected.",
-                                       "actual": f"Opened {self.label(r2.get('start_sid'))}" + ("" if r2.get("cleared", True) else ", previous answers still selected") + ".",
-                                       "result": "Pass" if landed_ok and r2.get("cleared", True) else "Fail", "shot": r2.get("start_shot", "")})
-                if not landed_ok:
-                    self.col.add("assessment", "error", "Retry does not start the assessment again", slide_id=r["end_sid"],
-                                 slide_label=self.label(r["end_sid"]), screenshot=r.get("shot", ""), vw=1366, found_in="Assessment",
-                                 detail=f"Retry opened {self.label(r2.get('start_sid'))}", fix="Retry should open the first question.")
-                    break
-                r = r2
-            A["attempts_seen"] = tries
-            if attempts:
-                ok = tries == attempts
-                A["scenarios"].append({"name": "Number of attempts",
-                                       "steps": "Fail the assessment and press Retry until it is no longer offered.",
-                                       "expected": f"{attempts} attempt{'s' if attempts != 1 else ''} (as the rules screen says).",
-                                       "actual": f"{tries} attempt{'s' if tries != 1 else ''} allowed" + (" (or more)" if tries >= cap and not ok else "") + ".",
-                                       "result": "Pass" if ok else "Fail", "shot": r.get("shot", "")})
-                if not ok:
-                    self.col.add("assessment", "error", "Number of attempts is different from the rules screen",
-                                 slide_id=r["end_sid"], slide_label=self.label(r["end_sid"]), screenshot=r.get("shot", ""), vw=1366,
-                                 detail=f"Rules screen: {attempts} attempts. Course allows: {tries}.", found_in="Assessment",
-                                 fix=f"Allow exactly {attempts} attempts, or correct the rules screen.")
+
+        def run(pct, run_no, retry_box=None):
+            r = play(pct, run_no, retry_box)
+            if r is None and not retry_box:   # the blank-answer check used up the attempt: play it again
+                r = play(pct, run_no, retry_box)
+            return r
+
+        self.strict_plan(A, quiz, results, run, pm, asked, can_right=(True, ""), can_wrong=(True, ""))
         # questions a question bank did not draw in any attempt
         for qi in A["questions"]:
             if not qi["shot"]:
@@ -548,13 +534,13 @@ class QuizMixin:
         A = self.assessment = {"questions": [], "scenarios": [], "rules": {}, "pass_mark": None,
                                "rules_ids": [s.id for s in rules], "quiz_ids": [s.id for s in quiz],
                                "results_ids": [s.id for s in results]}
-        rules_text = " ".join(" ".join(s.texts) for s in rules)
+        rules_text = "\n".join("\n".join(s.texts) for s in rules)
         A["rules"] = stated_rules(rules_text)
         scoring = next((x for x in self.course.scorings if x.get("type") not in (None, "view")), None) or {}
         A["pass_mark"] = scoring.get("passPercent")
         # progress: ~4 options per question, then the full attempts (each answers every asked question)
         asked = self.course.asked(quiz) if hasattr(self.course, "asked") else len(quiz)
-        runs = 2 + max(0, min(5, (A["rules"].get("attempts") or 3) - 1))
+        runs = 4 + self.attempts_to_test(A["rules"])
         total_steps = sum(4 for _ in quiz) + 4 + runs * asked
         step = 0
         self._aprog = {"base": sum(4 for _ in quiz) + 4, "total": total_steps, "n": 0}
@@ -633,70 +619,19 @@ class QuizMixin:
                 self.col.add("assessment", "error", "The question can be submitted without choosing an answer", slide_id=q0.id,
                              slide_label=q0.label, screenshot=shot, vw=1366, found_in="Assessment",
                              fix="Ask the learner to choose an answer before Submit is accepted.")
-        # 3. full attempts (only for a graded assessment with a results screen)
-        if not results:
-            A["scenarios"].append({"name": "Full assessment (pass / fail / retry)", "steps": "—",
-                                   "expected": "—", "actual": "No graded assessment with a results screen in this course: "
-                                   "only the question screens were tested.", "result": "N/A", "shot": ""})
-            self.col.ran("assessment")
-            ctx.close()
-            return
+        # 3. full attempts: the fixed plan (scores 100, 80, 60, 0; then every attempt the rules allow)
         keys = {qi["sid"]: qi.get("key") or [] for qi in A["questions"]}
         nopt = {qi["sid"]: len(qi["options"]) for qi in A["questions"]}
-        can_right = all(keys.get(q.id) for q in quiz)
-        can_wrong = all(nopt.get(q.id, 0) > len(keys.get(q.id) or []) for q in quiz)
-        attempts = A["rules"].get("attempts")
+        no_key = [q.label for q in quiz if not keys.get(q.id)]
+        no_wrong = [q.label for q in quiz if not nopt.get(q.id, 0) > len(keys.get(q.id) or [])]
+        can_right = (not no_key, "the right answer could not be found from the feedback for " + ", ".join(no_key[:4]) +
+                     (" …" if len(no_key) > 4 else ""))
+        can_wrong = (not no_wrong, "a wrong option could not be found for " + ", ".join(no_wrong[:4]) + (" …" if len(no_wrong) > 4 else ""))
         pm = A["pass_mark"] if A["pass_mark"] is not None else A["rules"].get("pass_mark")
-        if can_right:
-            r = self._attempt(page, quiz, "right", keys, nopt)
-            self._judge(A, r, "All answers correct", "pass", pm, quiz)
-        else:
-            A["scenarios"].append({"name": "All answers correct", "steps": "Answer every question correctly.",
-                                   "expected": "Pass", "actual": "Not run: the right answer of every question could not be found from the feedback.",
-                                   "result": "Not tested", "shot": ""})
-        if can_wrong:
-            r = self._attempt(page, quiz, "wrong", keys, nopt)
-            self._judge(A, r, "All answers wrong", "fail", pm, quiz)
-            # retries
-            if r.get("retry") is not None and r["end_sid"] in A["results_ids"]:
-                tries = 1
-                cap = min(6, attempts + 1) if attempts else 3
-                while r.get("retry") and tries < cap:
-                    tries += 1
-                    r2 = self._attempt(page, quiz, "wrong", keys, nopt, page_ready=True, retry_box=r["retry"])
-                    landed_ok = self.is_first_question(r2.get("start_sid"), quiz)
-                    if not landed_ok and self._retake_course(r, r2, tries, quiz):
-                        tries -= 1
-                        break
-                    A["scenarios"].append({"name": f"Retry – attempt {tries}",
-                                           "steps": "On the results screen press Retry.",
-                                           "expected": f"The assessment starts again at {quiz[0].label} with no answers selected.",
-                                           "actual": f"Opened {self.label(r2.get('start_sid'))}" + ("" if r2.get("cleared", True) else ", previous answers still selected") + ".",
-                                           "result": "Pass" if landed_ok and r2.get("cleared", True) else "Fail", "shot": r2.get("start_shot", "")})
-                    if not landed_ok:
-                        self.col.add("assessment", "error", "Retry does not start the assessment again", slide_id=r["end_sid"],
-                                     slide_label=self.label(r["end_sid"]), screenshot=r.get("shot", ""), vw=1366, found_in="Assessment",
-                                     detail=f"Retry opened {self.label(r2.get('start_sid'))}",
-                                     fix=f"Retry should open {quiz[0].label}.")
-                        break
-                    r = r2
-                A["attempts_seen"] = tries
-                if attempts:
-                    ok = tries == attempts
-                    A["scenarios"].append({"name": "Number of attempts",
-                                           "steps": "Fail the assessment and press Retry until it is no longer offered.",
-                                           "expected": f"{attempts} attempt{'s' if attempts != 1 else ''} (as the rules screen says).",
-                                           "actual": f"{tries} attempt{'s' if tries != 1 else ''} allowed.",
-                                           "result": "Pass" if ok else "Fail", "shot": r.get("shot", "")})
-                    if not ok:
-                        self.col.add("assessment", "error", "Number of attempts is different from the rules screen",
-                                     slide_id=r["end_sid"], slide_label=self.label(r["end_sid"]), screenshot=r.get("shot", ""), vw=1366,
-                                     detail=f"Rules screen: {attempts} attempts. Course allows: {tries}.", found_in="Assessment",
-                                     fix=f"Allow exactly {attempts} attempts, or correct the rules screen.")
-        else:
-            A["scenarios"].append({"name": "All answers wrong", "steps": "Answer every question wrongly.",
-                                   "expected": "Fail", "actual": "Not run: a wrong option could not be found for every question.",
-                                   "result": "Not tested", "shot": ""})
+        self.strict_plan(A, quiz, results,
+                         lambda pct, run_no, retry_box=None: self._attempt(page, quiz, pct, keys, nopt, page_ready=bool(retry_box),
+                                                                         retry_box=retry_box),
+                         pm, asked, can_right=can_right, can_wrong=can_wrong)
         # 4. the rules screen against the course
         n_rules = A["rules"].get("questions")
         n_asked = self.course.asked(quiz) if hasattr(self.course, "asked") else len(quiz)
@@ -770,6 +705,7 @@ class QuizMixin:
                 return out
             out["start_sid"] = sid
         qids = {q.id for q in quiz}
+        n_right = self.n_right(mode, self.course.asked(quiz))
         for _ in range(len(quiz) * 2 + 2):
             self.check_time()
             if sid not in qids:
@@ -777,7 +713,8 @@ class QuizMixin:
             self.settle_timeline(page)
             key = keys.get(sid) or []
             n = nopt.get(sid, 0)
-            pick = key[0] if mode == "right" else next((k for k in range(n) if k not in key), 0)
+            rt = len(out["answers"]) < n_right
+            pick = key[0] if rt and key else next((k for k in range(n) if k not in key), 0)
             self.select_option(page, pick)
             fb, _ = self.submit_answer(page)
             out["answers"].append((sid, pick, fb))
@@ -836,12 +773,249 @@ class QuizMixin:
             "actual": f"Opened {self.label(start)} (the course starts again).", "result": "Pass", "shot": r2.get("start_shot", "")})
         return True
 
-    def _judge(self, A, r, name, want, pass_mark, quiz):
-        """Compares one full attempt with what should happen."""
+    # ---------------------------------------------------------------- the fixed plan (every stage, never changed)
+    def n_right(self, pct, asked):
+        """How many of the asked questions are answered right for a target score (60% of 10 = 6)."""
+        if isinstance(pct, str):
+            pct = 100 if pct == "right" else 0
+        return int(pct * asked / 100 + 0.5) if asked else 0
+
+    def attempts_to_test(self, rules):
+        """Attempts played in the attempts part of the plan: every attempt the rules screen allows
+        (at most 10); 3 when the rules screen states no number or says the attempts are unlimited."""
+        n = rules.get("attempts")
+        return min(n, 10) if n else 3
+
+    def _clear_ticks(self, page):
+        """Select-all-that-apply: untick every ticked option before answering."""
+        for o in self._options(page):
+            if o.get("checked"):
+                b = o["box"]
+                page.mouse.click(b[0] + min(b[2] / 2, 24), b[1] + b[3] / 2)
+                page.wait_for_timeout(300)
+
+    def _not_tested(self, A, name, steps, expected, why):
+        A["scenarios"].append({"name": name, "steps": steps, "expected": expected, "actual": f"Not run: {why}.",
+                               "result": "Not tested", "shot": ""})
+
+    def strict_plan(self, A, quiz, results, run, pm, asked, can_right, can_wrong):
+        """THE ASSESSMENT PLAN – the same rows, in the same order, in every stage and for every course:
+          1. Score 100%, 2. Score 80%, 3. Score 60%, 4. Score 0%   (each in a new learner session; the first questions
+             asked are answered right, the rest wrong; pass or fail as per the pass mark; score shown and sent to the LMS)
+          5. Retry – attempt 2 … N   (from the 0% attempt: Retry, then 0% again, for every attempt the rules screen allows)
+          6. After the last attempt   (no more Retry; Retake / restart as the rules screen says)
+          7. Number of attempts       (allowed by the course vs the rules screen)
+        A row that cannot be run is reported as "Not tested" with the reason; no row is ever left out."""
+        graded = bool(results)
+        no_res = "there is no graded assessment with a results screen in this course (only the questions were tested)"
+        r0 = None
+        for i, pct in enumerate(SCORES):
+            k = self.n_right(pct, asked)
+            exp = round(100 * k / asked) if asked else pct
+            name = f"Score {pct}%"
+            steps = (f"New learner session. Answer {k} of {asked} questions right and {asked - k} wrong "
+                     "(right answers first, in the order the questions are asked), then open the results screen.")
+            want = ("pass" if exp >= pm else "fail") if pm is not None else ("pass" if pct == 100 else "fail" if pct == 0 else None)
+            expected = f"Score {exp}%" + (f" – {'Pass' if want == 'pass' else 'Fail'}" if want else "") + \
+                       (f" (pass mark {pm}%)" if pm is not None else "")
+            if not graded:
+                self._not_tested(A, name, steps, expected, no_res)
+                continue
+            if k and not can_right[0]:
+                self._not_tested(A, name, steps, expected, can_right[1])
+                continue
+            if k < asked and not can_wrong[0]:
+                self._not_tested(A, name, steps, expected, can_wrong[1])
+                continue
+            r = run(pct, i)
+            if r is None:
+                self._not_tested(A, name, steps, expected, "the attempt could not be started")
+                continue
+            self._judge(A, r, name, want, pm, quiz, expect_pct=exp, steps=steps)
+            if pct == 0:
+                r0 = r
+        self._attempts_plan(A, quiz, run, r0, graded)
+
+    def _attempts_plan(self, A, quiz, run, r, graded):
+        rules = A["rules"]
+        n = rules.get("attempts")            # None: not stated, 0: unlimited, N: N attempts
+        target = self.attempts_to_test(rules)
+        instr = rules.get("instruction") or ""
+        says = (f"The rules screen says {n} attempt{'s' if n != 1 else ''}" if n else
+                "The rules screen says the attempts are unlimited" if n == 0 else "The rules screen does not state the number of attempts")
+        retry_steps = "On the results screen press Retry (or Retake), then answer every question wrong again."
+        rows = [f"Retry – attempt {t}" for t in range(2, target + 1)]
+        capped = bool(n) and n > target   # more than 10 attempts allowed: the first 10 are tested
+        stop = None
+        if not graded:
+            stop = "there is no graded assessment with a results screen in this course"
+        elif r is None or r.get("blocked") or r.get("end_sid") not in A["results_ids"]:
+            stop = "the Score 0% attempt did not reach the results screen"
+        seen, extra, after_shot, no_retry = 1, False, (r or {}).get("shot", ""), None
+        t = 2
+        while not stop and t <= target:
+            name = f"Retry – attempt {t}"
+            left = self._attempts_left(r.get("text", ""))
+            left_note = ""
+            if left is not None and n:
+                ok_left = left == n - (t - 1)
+                left_note = f" The results screen says {left} attempt{'s' if left != 1 else ''} left" + ("." if ok_left else f", expected {n - (t - 1)}.")
+                if not ok_left:
+                    self.col.add("assessment", "error", "Attempts left shown on the results screen is wrong", slide_id=r["end_sid"],
+                                 slide_label=self.label(r["end_sid"]), screenshot=r.get("shot", ""), vw=1366, found_in="Assessment",
+                                 detail=f"After attempt {t - 1} of {n}: shows {left} left, expected {n - (t - 1)}.",
+                                 fix="Show the right number of attempts left.")
+            if r.get("retry") is None:
+                ok = n is None   # no number on the rules screen: nothing promised
+                no_retry = t - 1
+                A["scenarios"].append({"name": name, "steps": retry_steps,
+                                       "expected": f"Retry is offered ({says.lower()}).",
+                                       "actual": f"No Retry on the results screen after attempt {t - 1}." + left_note,
+                                       "result": "N/A" if ok else "Fail", "shot": r.get("shot", "")})
+                if n is not None:
+                    self.col.add("assessment", "error", "Retry is not offered although attempts remain", slide_id=r["end_sid"],
+                                 slide_label=self.label(r["end_sid"]), screenshot=r.get("shot", ""), vw=1366, found_in="Assessment",
+                                 detail=f"{says}; no Retry after attempt {t - 1}.", fix=f"Offer Retry until all {n} attempts are used.")
+                stop = f"no Retry was offered after attempt {t - 1}"
+                t += 1
+                break
+            r2 = run(0, t - 1, retry_box=r["retry"])
+            landed = self.is_first_question(r2.get("start_sid"), quiz)
+            cleared = r2.get("cleared", True)
+            A["scenarios"].append({"name": name, "steps": retry_steps,
+                                   "expected": f"The assessment starts again at the first question with no answers selected ({says.lower()}).",
+                                   "actual": f"Opened {self.label(r2.get('start_sid'))}" + ("" if cleared else ", previous answers still selected") +
+                                             "." + left_note,
+                                   "result": "Pass" if landed and cleared else "Fail", "shot": r2.get("start_shot", "")})
+            if not landed:
+                self.col.add("assessment", "error", "Retry does not start the assessment again", slide_id=r["end_sid"],
+                             slide_label=self.label(r["end_sid"]), screenshot=r.get("shot", ""), vw=1366, found_in="Assessment",
+                             detail=f"Retry after attempt {t - 1} opened {self.label(r2.get('start_sid'))}.",
+                             fix="Retry should open the first question of the assessment.")
+                stop = f"Retry after attempt {t - 1} did not start the assessment again"
+                t += 1
+                break
+            if not cleared:
+                self.col.add("assessment", "error", "Previous answers are still selected after Retry", slide_id=r2.get("start_sid"),
+                             slide_label=self.label(r2.get("start_sid")), screenshot=r2.get("start_shot", ""), vw=1366,
+                             found_in="Assessment", fix="Reset the questions when the learner retries the assessment.")
+            self._judge(A, r2, f"Attempt {t} – score 0%", "fail", None, quiz, expect_pct=0,
+                        steps=f"Attempt {t}: answer every question wrong, then open the results screen.")
+            seen, r, after_shot = t, r2, r2.get("shot", "")
+            if r2.get("blocked") or r2.get("end_sid") not in A["results_ids"]:
+                stop = f"attempt {t} did not reach the results screen"
+                t += 1
+                break
+            t += 1
+        for name in rows[t - 2:]:
+            self._not_tested(A, name, retry_steps, "Retry starts the assessment again.", stop or "—")
+        # after the last attempt
+        name = "After the last attempt"
+        if n:
+            exp_last = (f"After attempt {n} Retry is no longer offered" +
+                        ("; Retake starts the course again, as the rules screen says." if self._retake_course_said(instr) else ".") +
+                        (f" Rules screen: “{instr}”" if instr else ""))
+        elif n == 0:
+            exp_last = f"Retry is still offered after attempt {target} (unlimited attempts)." + (f" Rules screen: “{instr}”" if instr else "")
+        else:
+            exp_last = f"{says}: what the results screen offers after attempt {target} is recorded." + (f" Rules screen: “{instr}”" if instr else "")
+        if no_retry and n is None:
+            A["scenarios"].append({"name": name, "steps": f"After attempt {no_retry}, look at the results screen.", "expected": exp_last,
+                                   "actual": f"No Retry after attempt {no_retry}: the course allows {no_retry} attempt{'s' if no_retry != 1 else ''}.",
+                                   "result": "N/A", "shot": after_shot})
+        elif stop or capped:
+            self._not_tested(A, name, "Use up the attempts, then look at the results screen.", exp_last,
+                             stop or f"the rules screen allows {n} attempts; the first {target} were tested")
+        elif n:
+            if r.get("retry") is None:
+                A["scenarios"].append({"name": name, "steps": f"After attempt {n}, look at the results screen.", "expected": exp_last,
+                                       "actual": "No Retry is offered: the attempts are used up.", "result": "Pass", "shot": after_shot})
+            else:
+                r3 = run(0, n, retry_box=r["retry"])
+                start = r3.get("start_sid") or ""
+                ids = [x.id for x in self.course.slides]
+                if self.is_first_question(start, quiz):
+                    extra = True
+                    A["scenarios"].append({"name": name, "steps": f"After attempt {n}, press Retry / Retake.", "expected": exp_last,
+                                           "actual": f"Another attempt started ({self.label(start)}).", "result": "Fail",
+                                           "shot": r3.get("start_shot", "")})
+                    self.col.add("assessment", "error", "More attempts are allowed than the rules screen says", slide_id=r["end_sid"],
+                                 slide_label=self.label(r["end_sid"]), screenshot=after_shot, vw=1366, found_in="Assessment",
+                                 detail=f"{says}; attempt {n + 1} could be started.", fix=f"Allow exactly {n} attempts, or correct the rules screen.")
+                elif start in ids and quiz and ids.index(start) < ids.index(quiz[0].id):
+                    A["scenarios"].append({"name": name, "steps": f"After attempt {n}, press Retake.", "expected": exp_last,
+                                           "actual": f"Retake opened {self.label(start)}: the course starts again.", "result": "Pass",
+                                           "shot": r3.get("start_shot", "")})
+                else:
+                    A["scenarios"].append({"name": name, "steps": f"After attempt {n}, press the Retry / Retake button.", "expected": exp_last,
+                                           "actual": f"The button opened {self.label(start) if start else 'nothing'}.", "result": "Fail",
+                                           "shot": r3.get("start_shot", "")})
+                    self.col.add("assessment", "error", "The button after the last attempt does not do what the rules screen says",
+                                 slide_id=r["end_sid"], slide_label=self.label(r["end_sid"]), screenshot=after_shot, vw=1366,
+                                 found_in="Assessment", detail=f"Opened {self.label(start) if start else 'nothing'}.",
+                                 fix="After the last attempt, remove Retry or let Retake start the course again.")
+        else:
+            has = r.get("retry") is not None
+            ok = has if n == 0 else None
+            A["scenarios"].append({"name": name, "steps": f"After attempt {target}, look at the results screen.", "expected": exp_last,
+                                   "actual": "Retry is still offered." if has else "No Retry is offered.",
+                                   "result": "N/A" if ok is None else ("Pass" if ok else "Fail"), "shot": after_shot})
+            if ok is False:
+                self.col.add("assessment", "error", "Retry is not offered although the attempts are unlimited", slide_id=r["end_sid"],
+                             slide_label=self.label(r["end_sid"]), screenshot=after_shot, vw=1366, found_in="Assessment",
+                             detail=f"No Retry after attempt {target}.", fix="Offer Retry after every attempt, as the rules screen says.")
+        # number of attempts
+        A["attempts_seen"] = (f"{seen}+" if extra else seen) if not stop or seen > 1 else None
+        name = "Number of attempts"
+        steps = "Fail the assessment and press Retry until it is no longer offered."
+        if capped and not stop:
+            A["scenarios"].append({"name": name, "steps": steps, "expected": f"{n} attempts (rules screen).",
+                                   "actual": f"At least {seen} attempts allowed (tested up to {target}).", "result": "Pass", "shot": after_shot})
+        elif n and not stop:
+            ok = seen == n and not extra
+            A["scenarios"].append({"name": name, "steps": steps, "expected": f"{n} attempt{'s' if n != 1 else ''} (rules screen).",
+                                   "actual": f"{seen}{' or more' if extra else ''} attempt{'s' if seen != 1 or extra else ''} allowed.",
+                                   "result": "Pass" if ok else "Fail", "shot": after_shot})
+            if not ok and not extra:
+                self.col.add("assessment", "error", "Number of attempts is different from the rules screen", slide_id=r["end_sid"],
+                             slide_label=self.label(r["end_sid"]), screenshot=after_shot, vw=1366, found_in="Assessment",
+                             detail=f"Rules screen: {n} attempts. Course allows: {seen}.", fix=f"Allow exactly {n} attempts, or correct the rules screen.")
+        elif no_retry and n is None:
+            A["scenarios"].append({"name": name, "steps": steps, "expected": says + ".",
+                                   "actual": f"{seen} attempt{'s' if seen != 1 else ''} allowed.", "result": "N/A", "shot": after_shot})
+        elif stop and not (n is not None and no_retry):
+            self._not_tested(A, name, steps, says + ".", stop)
+        elif stop:
+            A["scenarios"].append({"name": name, "steps": steps, "expected": (f"{n} attempts" if n else "Unlimited attempts") + " (rules screen).",
+                                   "actual": f"Only {seen} attempt{'s' if seen != 1 else ''} allowed.", "result": "Fail", "shot": after_shot})
+        else:
+            A["scenarios"].append({"name": name, "steps": steps, "expected": says + ".",
+                                   "actual": f"At least {seen} attempts allowed (tested up to {target}).",
+                                   "result": "Pass" if n == 0 else "N/A", "shot": after_shot})
+
+    @staticmethod
+    def _attempts_left(text):
+        t = (text or "").lower()
+        m = re.search(r"(\d+|no|" + "|".join(k for k in NUM_WORDS if k != "unlimited") + r")\s+(?:more\s+)?(?:attempts?|tries|chances)\s+(?:remaining|left)", t) \
+            or re.search(r"(?:attempts?|tries|chances)\s+(?:remaining|left)\s*:?\s*(\d+)", t)
+        if not m:
+            return None
+        v = m.group(1)
+        return 0 if v == "no" else int(v) if v.isdigit() else NUM_WORDS.get(v)
+
+    @staticmethod
+    def _retake_course_said(instr):
+        return bool(re.search(r"\b(retake|restart|redo|take)\b.{0,40}\b(course|module)\b", instr or "", re.I))
+
+    def _judge(self, A, r, name, want, pass_mark, quiz, expect_pct=None, steps=None):
+        """Compares one full attempt with what should happen: results screen reached, pass / fail as the pass
+        mark says (want None: not judged), the score shown and the result sent to the LMS."""
+        if expect_pct is None:
+            expect_pct = 100 if want == "pass" else 0
+        steps = steps or "Answer the questions, then open the results screen."
         if r.get("blocked"):
-            A["scenarios"].append({"name": name, "steps": "Answer every question wrongly, then open the results screen.",
-                                   "expected": "Fail", "actual": f"Not run to the end: {r['blocked']}.",
-                                   "result": "Not tested", "shot": r.get("shot", "")})
+            A["scenarios"].append({"name": name, "steps": steps, "expected": f"Score {expect_pct}%",
+                                   "actual": f"Not run to the end: {r['blocked']}.", "result": "Not tested", "shot": r.get("shot", "")})
             return
         results_ids = A["results_ids"]
         end = r.get("end_sid") or ""
@@ -855,6 +1029,9 @@ class QuizMixin:
         if not reached and after_quiz and want == "pass" and (PASS_RE.search(text) or status in ("passed", "completed")):
             reached = True
         nums = [int(x) for x in re.findall(r"(\d{1,3})\s*%", text)]
+        shown = list(nums)
+        if pass_mark is not None and pass_mark in shown and expect_pct != pass_mark:
+            shown.remove(pass_mark)   # the pass mark printed on the results screen is not the learner's score
         problems = []
         if not reached:
             problems.append("The results screen did not open after the last question" + (f" (stopped on {self.label(end)})" if end else ""))
@@ -863,24 +1040,26 @@ class QuizMixin:
                 problems.append("The results screen does not say the learner passed")
             if want == "fail" and not FAIL_RE.search(text):
                 problems.append("The results screen does not say the learner failed")
-            if want == "pass" and nums and max(nums) < 100:
-                problems.append(f"Score shown is {max(nums)}%, expected 100%")
-            if want == "fail" and nums and min(nums) > 0 and all(r_[2] != "Correct" for r_ in r["answers"]):
-                problems.append(f"Score shown is {min(nums)}%, expected 0%")
+            if shown and not any(abs(x - expect_pct) <= 1 for x in shown):
+                problems.append(f"Score shown is {shown[0]}%, expected {expect_pct}%")
             if lms and any(lms.values()):
                 if want == "pass" and status not in ("passed", "completed"):
                     problems.append(f"LMS status is “{status or 'not sent'}”, expected “passed”")
                 if want == "fail" and status in ("passed",):
-                    problems.append("LMS status is “passed” although every answer was wrong")
-                if want == "pass" and lms.get("score") and lms.get("score_max") and lms["score"] != lms["score_max"]:
-                    problems.append(f"LMS score is {lms['score']} of {lms['score_max']}, expected full marks")
-        expected = ("Results screen says the learner passed (100%)" if want == "pass" else "Results screen says the learner failed (0%)") + \
-                   (f"; pass mark {pass_mark}%" if pass_mark is not None else "") + "; result sent to the LMS"
+                    problems.append(f"LMS status is “passed” although the score ({expect_pct}%) is below the pass mark")
+                try:
+                    raw, mx = float(lms.get("score") or "nan"), float(lms.get("score_max") or "nan")
+                    if mx > 0 and abs(100 * raw / mx - expect_pct) > 1:
+                        problems.append(f"LMS score is {lms['score']} of {lms['score_max']} ({round(100 * raw / mx)}%), expected {expect_pct}%")
+                except ValueError:
+                    pass
+        expected = f"Results screen shows {expect_pct}%" + \
+                   ({"pass": " and says the learner passed", "fail": " and says the learner failed"}.get(want, "")) + \
+                   (f" (pass mark {pass_mark}%)" if pass_mark is not None else "") + "; result sent to the LMS"
         actual = ((f"Results screen: “{' '.join(text.split()[:30])}”" if end in results_ids or not results_ids
                    else f"{self.label(end)}: “{' '.join(text.split()[:30])}”") if reached else "Results screen not reached") + \
                  (f"; LMS: status {status or 'not sent'}, score {lms.get('score') or '—'}" + (f"/{lms['score_max']}" if lms.get("score_max") else "") if lms else "")
-        A["scenarios"].append({"name": name, "steps": ("Answer every question correctly" if want == "pass" else "Answer every question wrongly") +
-                               f" ({len(r['answers'])} answers given), then open the results screen.",
+        A["scenarios"].append({"name": name, "steps": steps + f" ({len(r['answers'])} answers given)",
                                "expected": expected, "actual": actual, "result": "Fail" if problems else "Pass",
                                "shot": r.get("shot", ""), "lms": lms})
         for p in problems:

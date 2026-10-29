@@ -572,8 +572,10 @@ def _assessment_sheet(wb, res, run_dir):
     """Assessment Test tab: the scenarios played (pass, fail, retry, no answer) and every answer option."""
     ws = wb.create_sheet("Assessment Test")
     A = res.get("assessment")
-    _title(ws, "Assessment Test", "The assessment was played like a learner: every option of every question, Submit with no "
-                                  "answer, all answers right, all answers wrong, and every Retry.")
+    _title(ws, "Assessment Test", "The assessment was played like a learner, always in the same fixed plan: every option of every "
+                                  "question, Submit with no answer, scores 100%, 80%, 60% and 0% (pass / fail as per the pass mark, "
+                                  "score shown and sent to the LMS), then every attempt the rules screen allows (Retry, Retake, "
+                                  "after the last attempt, number of attempts).")
     if not A:
         reason = (f"Not tested: testing stopped at an earlier screen ({res['blocked']['reason']})." if res.get("blocked")
                   else "No assessment (question screens) found in this course.")

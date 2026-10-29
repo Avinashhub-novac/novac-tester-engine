@@ -5,6 +5,7 @@ Every finding goes into the shared Collector.
 """
 import hashlib
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -132,6 +133,13 @@ class Crawler(QuizMixin):
                 pass
 
     def check_time(self):
+        name = getattr(getattr(self, "_tl", None), "name", None) or self.pass_name
+        if name == "assessment":
+            # the assessment plan always runs to the end: it opens the questions directly, so a screen the
+            # walk-through cannot pass does not stop it, and it has its own time allowance (at least 60 minutes)
+            if time.time() > max(self.deadline, getattr(self, "assess_deadline", 0)):
+                raise Deadline()
+            return
         if time.time() > self.deadline:
             raise Deadline()
         if self.blocked and self.pass_name not in ("", "desktop"):
@@ -2845,11 +2853,11 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 self._learned_base = bufs.pop("_learned")
         if self.blocked:
             # as if testing had stopped there: what ran beside the walk-through is not reported
-            for name in ("mobile", "assessment"):
+            for name in ("mobile",):   # the assessment plan is kept: it does not depend on the walk-through
                 if name in bufs:
                     bufs.pop(name)
                     self.log(f"Skipping the {name} pass: testing stopped at {self.label(self.blocked['sid'])}")
-            self.assessment, self.swipes = None, {}
+            self.swipes = {}
         for name in REPORT_ORDER:
             self.col.replay(bufs.pop(name, []))
         for name in sorted(bufs):
@@ -2867,7 +2875,12 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             browser = launch(pw, args=["--autoplay-policy=no-user-gesture-required", "--no-sandbox"])
             try:
                 for j, name in enumerate(lane):
-                    if self.blocked and name != "desktop":
+                    if not hasattr(self, "_tl"):
+                        self._tl = threading.local()
+                    self._tl.name = name
+                    if name == "assessment":
+                        self.assess_deadline = time.time() + 60 * 60
+                    if self.blocked and name not in ("desktop", "assessment"):
                         self.log(f"Skipping the {name} pass: testing stopped at {self.label(self.blocked['sid'])}")
                         continue
                     self.pass_name = name

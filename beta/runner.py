@@ -239,7 +239,7 @@ class Run:
             for c in ("menu", "buttons", "swipe", "restrictions", "completion", "interactivity"):
                 if c not in self.col.checks_run:
                     self.col.skip(c, f"Testing stopped at {stop}: the learner cannot go past this screen")
-            if "assessment" in passes:
+            if "assessment" in passes and not crawler.assessment:
                 self.col.skip("assessment", f"Testing stopped at {stop}, so the assessment was not tested")
         tables = self.test_tables(course, visits, crawler, passes)
         for v in visits.values():   # every picture taken of a screen, with where its text sits
@@ -416,7 +416,7 @@ class Run:
     def _passed_by_quiz(crawler):
         A = getattr(crawler, "assessment", None) or {}
         for s in A.get("scenarios") or []:
-            if s.get("name") == "All answers correct":
+            if s.get("name") in ("Score 100%", "All answers correct"):
                 lms = s.get("lms") or {}
                 st = " ".join(str(lms.get(k) or "") for k in ("status", "success", "completion")).lower()
                 return "passed" in st or "completed" in st
