@@ -62,6 +62,7 @@ class Slide:
     drag_items: list = field(default_factory=list)    # [{id, label}] objects the learner drags
     drop_targets: list = field(default_factory=list)  # [{id, label}] objects items can be dropped on
     drag_key: dict = field(default_factory=dict)      # drag item id -> right drop target id (drag-and-drop question)
+    hidden_choices: bool = False   # the question's "options" are hidden right / wrong flags set by the course's own logic
 
     @property
     def abs_id(self):
@@ -388,6 +389,9 @@ def _is_quiz(slide_json):
                                    '"kind":"sequence"', '"kind":"fillin"', '"kind":"hotspot"', '"kind":"wordbank"'))
 
 
+HIDDEN_FLAG_RE = re.compile(r"^\s*(correct|incorrect|right|wrong|true answer|false answer)\s*$", re.I)
+
+
 def _choices(slide_entry):
     """Answer options of a one-answer question and which one is right, as the course data defines them.
     Returns [] when the screen is not such a question (or the right answer cannot be read)."""
@@ -410,6 +414,10 @@ def _choices(slide_entry):
         out.append({"obj": obj, "text": _plain(c.get("lmstext") or ""), "correct": obj in right})
     if len(right) != 1 or sum(1 for c in out if c["correct"]) != 1:
         return []
+    if all(HIDDEN_FLAG_RE.match(c["text"] or "") for c in out):
+        # options named only "Correct" / "Incorrect": hidden flags that the slide's own triggers select
+        # (a custom drag-and-drop or other built interaction), not answers the learner clicks
+        return [dict(c, hidden=True) for c in out]
     return out
 
 
@@ -590,6 +598,10 @@ def load_course(extract_dir: Path) -> Course:
         s.drag_items, s.drop_targets = _drag_objects(sj)
         if s.drag_items:
             s.has_interaction = True
+        if s.choices and s.drag_items:
+            # a drag-and-drop question (or another built interaction) scored through hidden flags: the learner
+            # never clicks these "options", so they are not tested as options
+            s.hidden_choices, s.choices = True, []
         s.object_ids = {str(d["id"]) for _, d in _walk(sj) if "id" in d and isinstance(d.get("id"), (str, int))} - {s.id}
     # the slides the graded quiz scores (a draw stands for all its bank questions)
     for qz in data.get("quizzes") or []:

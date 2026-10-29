@@ -204,8 +204,12 @@ class QuizMixin:
         targets = [x["id"] for x in slide.drop_targets]
         names = {x["id"]: x["label"] for x in slide.drop_targets}
         key, out, used = slide.drag_key or {}, [], set()
-        for k, it in enumerate(slide.drag_items):
+        left = list(enumerate(slide.drag_items))
+        while left:
             self.check_time()
+            # stacked cards show one item at a time: take an item the learner can see now, else the next one
+            pick = next((j for j, (_, x) in enumerate(left) if self._visible_box(page, x["id"])), 0)
+            k, it = left.pop(pick)
             want = key.get(it["id"])
             if want and mode == "right":
                 tries = [want]
@@ -229,7 +233,8 @@ class QuizMixin:
                     break
             if res and res["placed"]:
                 used.add(tgt)
-            out.append({"item": it["label"] or it["id"], "target": names.get(tgt, tgt or ""), "moved": bool(res and res["moved"]),
+            out.append({"item": it["label"] or it["id"], "item_id": it["id"], "target_id": tgt,
+                        "target": names.get(tgt, tgt or ""), "moved": bool(res and res["moved"]),
                         "placed": bool(res and res["placed"])})
         return out
 
@@ -269,10 +274,51 @@ class QuizMixin:
         self._ready(page)
         self.dismiss_prompts(page)
 
+    def learn_drag_keys(self, browser, quiz):
+        """Drag-and-drop questions whose right placement is not in the course data (built with the slide's own
+        triggers): every placement is tried, in a new session each time, until the question says Correct."""
+        todo = [q for q in quiz if q.drag_items and q.drop_targets and not q.drag_key]
+        if not todo:
+            return
+        import itertools
+        ctx = browser.new_context(viewport={"width": 1366, "height": 768}, device_scale_factor=2)
+        page = self.open(ctx, "assessment")
+        try:
+            for q in todo:
+                items = [x["id"] for x in q.drag_items]
+                tg = [x["id"] for x in q.drop_targets]
+                # one item per drop place (as many places as items): only orders of the places; else any place per item
+                gen = itertools.permutations(tg) if len(tg) == len(items) else itertools.product(tg, repeat=len(items))
+                combos = [None] + list(itertools.islice(gen, 64))   # None: first, the way a learner would (a wrong drop springs back)
+                q.drag_note = f"the right drop place of every item could not be found ({len(combos)} placements tried)"
+                for combo in combos:
+                    self.check_time()
+                    self.fresh(page)
+                    if not self.open_question(page, q):
+                        q.drag_note = "the question could not be opened"
+                        break
+                    self.settle_timeline(page)
+                    want = dict(zip(items, combo)) if combo else {}
+                    q.drag_key = want
+                    placed = self.solve_drag(page, q, "right")
+                    q.drag_key = {}
+                    if not all(p["placed"] for p in placed):
+                        continue
+                    if not combo:
+                        want = {p["item_id"]: p["target_id"] for p in placed}
+                    fb, _ = self.submit_answer(page)
+                    if fb == "Correct":
+                        q.drag_key, q.drag_note = want, ""
+                        self.log(f"{q.label}: right drop places found by trying")
+                        break
+        finally:
+            ctx.close()
+
     def assessment_pass(self, browser):
         rules, quiz, results = assessment_parts(self.course)
         if not quiz:
             return
+        self.learn_drag_keys(browser, quiz)
         if results and all(q.choices or q.drag_key for q in quiz):
             # the course data says which answer is right: test everything in a few full attempts (no reloads)
             return self._assessment_fast(browser, rules, quiz, results)
@@ -348,22 +394,7 @@ class QuizMixin:
             fb, _ = self.submit_answer(page)
             here = self.identify(self.settle(page, 400))
             shot = self.shot(page, f"{sid}_blank")
-            # the blank answer was refused when the learner is asked to choose, or simply stays on the question
-            # with no right / wrong feedback (Submit stays greyed out until an option is chosen)
-            ok = fb == "Answer required" or (here == sid and fb not in ("Correct", "Incorrect"))
-            A["scenarios"].append({"name": "Submit without choosing an answer",
-                                   "steps": f"Open {q.label}, press Submit without selecting any option.",
-                                   "expected": "The learner is asked to choose an answer and stays on the question.",
-                                   "actual": {"Answer required": "A message asks to choose an answer.",
-                                              "No Submit button": "Submit is not available until an option is chosen."}.get(
-                                       fb, ("Stayed on the question; Submit does nothing until an option is chosen." if fb == "No feedback"
-                                            else f"Stayed on the question but showed “{fb}” feedback.") if here == sid
-                                       else f"Moved on to {self.label(here)}."),
-                                   "result": "Pass" if ok else "Fail", "shot": shot})
-            if not ok:
-                self.col.add("assessment", "error", "The question can be submitted without choosing an answer", slide_id=sid,
-                             slide_label=q.label, screenshot=shot, vw=1366, found_in="Assessment",
-                             fix="Ask the learner to choose an answer before Submit is accepted.")
+            ok = self.blank_row(A, q, fb, here, shot)
             self.dismiss_prompts(page)
             return ok and here == sid
 
@@ -562,7 +593,9 @@ class QuizMixin:
             qi["shot"] = self.shot(page, f"{q.id}_question")
             opts = self._options(page)
             if not opts:
-                qi["kind"] = "other"   # drag and drop, hotspot, typing: options cannot be listed automatically
+                qi["kind"] = "drag" if q.drag_items else "other"   # hotspot, typing: options cannot be listed automatically
+                if getattr(q, "drag_note", ""):
+                    qi["note"] = "Drag and drop: " + q.drag_note
                 continue
             for i in range(len(opts)):
                 self.check_time()
@@ -603,35 +636,25 @@ class QuizMixin:
                 self.col.add("assessment", "error", "No answer option is accepted as correct", slide_id=q.id, slide_label=q.label,
                              detail="Every option gave the “incorrect” feedback.", screenshot=sel[0]["shot"], vw=1366,
                              found_in="Assessment", fix="Mark the right answer as correct in the question settings.")
-        # 2. Submit with nothing selected
+        # 2. Submit with nothing selected (nothing placed, for a drag-and-drop question)
         q0 = quiz[0]
         self.fresh(page)
-        if self.open_question(page, q0) and self._options(page):
+        if self.open_question(page, q0) and (self._options(page) or q0.drag_items):
             self.settle_timeline(page)
             fb, text = self.submit_answer(page)
             here = self.identify(self.settle(page, 400))
             shot = self.shot(page, f"{q0.id}_blank")
-            # stays on the question with no feedback, or Submit is not offered until an option is chosen
-            ok = fb == "Answer required" or (here == q0.id and fb not in ("Correct", "Incorrect"))
-            A["scenarios"].append({"name": "Submit without choosing an answer",
-                                   "steps": f"Open {q0.label}, press Submit without selecting any option.",
-                                   "expected": "The learner is asked to choose an answer and stays on the question.",
-                                   "actual": {"Answer required": "A message asks to choose an answer."}.get(fb,
-                                             ("Stayed on the question; Submit does nothing until an option is chosen." if fb in ("No feedback", "No Submit button")
-                                              else f"Stayed on the question but showed “{fb}” feedback.") if here == q0.id
-                                             else f"Moved on to {self.label(here)}."),
-                                   "result": "Pass" if ok else "Fail", "shot": shot})
-            if not ok:
-                self.col.add("assessment", "error", "The question can be submitted without choosing an answer", slide_id=q0.id,
-                             slide_label=q0.label, screenshot=shot, vw=1366, found_in="Assessment",
-                             fix="Ask the learner to choose an answer before Submit is accepted.")
+            self.blank_row(A, q0, fb, here, shot)
+        else:
+            self.blank_row(A, q0, None, None, "")
         # 3. full attempts: the fixed plan (scores 100, 80, 60, 0; then every attempt the rules allow)
         keys = {qi["sid"]: qi.get("key") or [] for qi in A["questions"]}
         nopt = {qi["sid"]: len(qi["options"]) for qi in A["questions"]}
         no_key = [q.label for q in quiz if not keys.get(q.id)]
         no_wrong = [q.label for q in quiz if not nopt.get(q.id, 0) > len(keys.get(q.id) or [])]
-        can_right = (not no_key, "the right answer could not be found from the feedback for " + ", ".join(no_key[:4]) +
-                     (" …" if len(no_key) > 4 else ""))
+        drag_notes = [f"{q.label}: {q.drag_note}" for q in quiz if getattr(q, "drag_note", "") and not keys.get(q.id)]
+        can_right = (not no_key, ("; ".join(drag_notes[:3]) + "; " if drag_notes else "") +
+                     "the right answer could not be found from the feedback for " + ", ".join(no_key[:4]) + (" …" if len(no_key) > 4 else ""))
         can_wrong = (not no_wrong, "a wrong option could not be found for " + ", ".join(no_wrong[:4]) + (" …" if len(no_wrong) > 4 else ""))
         pm = A["pass_mark"] if A["pass_mark"] is not None else A["rules"].get("pass_mark")
         self.strict_plan(A, quiz, results,
@@ -778,6 +801,32 @@ class QuizMixin:
             "expected": "The attempts are used up: the course starts again.",
             "actual": f"Opened {self.label(start)} (the course starts again).", "result": "Pass", "shot": r2.get("start_shot", "")})
         return True
+
+    def blank_row(self, A, q, fb, here, shot):
+        """'Submit without answering' on the first question, worded for its type. fb None: could not be tried."""
+        drag = bool(q.drag_items)
+        name = "Submit without placing any item" if drag else "Submit without choosing an answer"
+        what = "placing any item" if drag else "selecting any option"
+        until = "every item is placed" if drag else "an option is chosen"
+        steps = f"Open {q.label}, press Submit without {what}."
+        expected = (f"Submit is not accepted until {until} (or the learner is asked to " +
+                    ("place the items" if drag else "choose an answer") + "); the learner stays on the question.")
+        if fb is None:
+            self._not_tested(A, name, steps, expected, f"{q.label} could not be opened, or it has no options or items to leave empty")
+            return False
+        # refused: the learner is asked to answer, or stays on the question with no right / wrong feedback
+        ok = fb == "Answer required" or (here == q.id and fb not in ("Correct", "Incorrect"))
+        actual = {"Answer required": "A message asks the learner to " + ("place the items." if drag else "choose an answer."),
+                  "No Submit button": f"Submit is not available until {until}."}.get(
+            fb, (f"Stayed on the question; Submit does nothing until {until}." if fb == "No feedback"
+                 else f"Stayed on the question but showed “{fb}” feedback.") if here == q.id else f"Moved on to {self.label(here)}.")
+        A["scenarios"].append({"name": name, "steps": steps, "expected": expected, "actual": actual,
+                               "result": "Pass" if ok else "Fail", "shot": shot})
+        if not ok:
+            self.col.add("assessment", "error", "The question can be submitted without " + what.replace("selecting any option", "choosing an answer"),
+                         slide_id=q.id, slide_label=q.label, screenshot=shot, vw=1366, found_in="Assessment",
+                         fix="Accept Submit only after the learner has " + ("placed the items." if drag else "chosen an answer."))
+        return ok
 
     # ---------------------------------------------------------------- the fixed plan (every stage, never changed)
     def n_right(self, pct, asked):
