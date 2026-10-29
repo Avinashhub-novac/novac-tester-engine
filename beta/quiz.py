@@ -195,8 +195,16 @@ class QuizMixin:
             if want and mode == "right":
                 tries = [want]
             elif want:
-                others = [x for x in targets if x != want] or [want]
-                tries = [others[(k + rot) % len(others)]]
+                # every item on a DIFFERENT wrong target: a target usually keeps only one item, so items that all
+                # aim at the same wrong target leave some unplaced and Submit stays off (seen on matching questions)
+                n = len(slide.drag_items)
+                order = [key.get(slide.drag_items[(k + 1 + rot + j) % n]["id"]) for j in range(n)] + targets
+                others, seen = [], set()
+                for x in order:
+                    if x and x != want and x in targets and x not in seen:
+                        seen.add(x)
+                        others.append(x)
+                tries = [x for x in others if x not in used] + [x for x in others if x in used] or [want]
             else:   # no answer key: try each free target until one keeps the item
                 tries = [x for x in targets if x not in used] + [x for x in targets if x in used]
             res, tgt = None, None
@@ -403,9 +411,13 @@ class QuizMixin:
                     out["answers"].append((sid, k, fb))
                     new = self.leave_feedback(page, sid)
                     if new == sid:
-                        self.answer_drag(page, sid, q, mode, run_no)
+                        placed = self.answer_drag(page, sid, q, mode, run_no + 1)[0]
                         new = self.leave_feedback(page, sid)
                         if new == sid:
+                            if mode == "wrong" and not all(p["placed"] for p in placed):
+                                # the tester could not lay out a full wrong answer, so Submit never opened: not a course error
+                                out["blocked"] = (f"the tester could not place every item of {q.label} on a wrong target "
+                                                  f"({sum(p['placed'] for p in placed)} of {len(placed)} placed), so the question could not be submitted")
                             break
                     sid = new
                     ap = self._aprog
@@ -826,6 +838,11 @@ class QuizMixin:
 
     def _judge(self, A, r, name, want, pass_mark, quiz):
         """Compares one full attempt with what should happen."""
+        if r.get("blocked"):
+            A["scenarios"].append({"name": name, "steps": "Answer every question wrongly, then open the results screen.",
+                                   "expected": "Fail", "actual": f"Not run to the end: {r['blocked']}.",
+                                   "result": "Not tested", "shot": r.get("shot", "")})
+            return
         results_ids = A["results_ids"]
         end = r.get("end_sid") or ""
         reached = end in results_ids if results_ids else (end and end not in {q.id for q in quiz})
