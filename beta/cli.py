@@ -90,7 +90,7 @@ def _paths(a):
     return run_dir, json.loads((run_dir / "results.json").read_text())
 
 
-def _save(run_dir, res):
+def _save(run_dir, res, name="results.json"):
     from beta.runner import summarize
     from beta import scope
     try:
@@ -103,7 +103,20 @@ def _save(run_dir, res):
     scope.apply(res, stage, kind, sel)   # nothing outside the stage's scope (or the ticked checks) is ever reported
     res["summary"] = summarize(res["findings"], set(res.get("checks_run", [])), res.get("checks_skipped", {}))
     scope.apply(res, stage, kind, sel)   # the checklist for the result page, from the final summary
-    (run_dir / "results.json").write_text(json.dumps(res, indent=1, ensure_ascii=False))
+    (run_dir / name).write_text(json.dumps(res, indent=1, ensure_ascii=False))
+
+
+# Every step after the browser checks can be run again safely (a retry never loses anything):
+#   merge starts each time from the engine's own results (results_engine.json),
+#   bundle starts each time from the merged results (results_merged.json),
+#   finalize never changes results.json (it writes results_final.json / results_upload.json).
+def _snapshot(run_dir, res, name):
+    """The results as they were the first time this step ran; a repeat of the step starts from them again."""
+    snap = run_dir / name
+    if snap.exists():
+        return json.loads(snap.read_text())
+    snap.write_text(json.dumps(res, ensure_ascii=False))
+    return res
 
 
 def _shot_for(slide, text):
@@ -118,6 +131,8 @@ def _shot_for(slide, text):
 def cmd_merge(a):
     os.environ.setdefault("DATA_DIR", a.work)
     run_dir, res = _paths(a)
+    res = _snapshot(run_dir, res, "results_engine.json")
+    (run_dir / "results_merged.json").unlink(missing_ok=True)   # a new merge: bundle starts from it
     tasks = json.loads((run_dir / "claude_tasks.json").read_text())
     ans = json.loads(Path(a.answers).read_text())
     added = 0
@@ -555,6 +570,7 @@ def _group(findings, slides):
 def cmd_bundle(a):
     _phase(a, "report")
     run_dir, res = _paths(a)
+    res = _snapshot(run_dir, res, "results_merged.json")   # bundling again starts from the original screenshots
     out = run_dir / "bundle"
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir()
@@ -789,7 +805,13 @@ def cmd_finalize(a):
         if comp.get(k):
             comp[k] = conv(comp[k])
     res["finished_at"] = time.time()
-    _save(run_dir, res)
+    # never deliver a report whose screenshots were lost: the screens were pictured, so the report must show them
+    pictured = [x for x in res.get("slides", []) if x.get("reached")]
+    shown = sum(1 for x in res.get("slides", []) if x.get("shot")) + sum(1 for f in res["findings"] if f.get("screenshot"))
+    if pictured and not shown:
+        raise SystemExit("The report has no screenshots although " + str(len(pictured)) + " screens were tested. "
+                         "Run bundle again, upload its pictures, then run finalize again.")
+    _save(run_dir, res, "results_final.json")   # results.json stays as bundle left it, so finalize can run again
     out = run_dir / "results_upload.json"
     out.write_text(json.dumps(res, ensure_ascii=False))
     s = res["summary"]
