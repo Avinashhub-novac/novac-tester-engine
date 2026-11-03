@@ -1401,9 +1401,35 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             except Exception:
                 continue
 
-    def _unstick(self, page, sid, slide, retry):
-        """The way forward did nothing. A learner may first have to click the screen's tabs, hotspots or answers,
-        or close a pop-up. Try that, then try going forward again (retry). Returns the slide we end up on."""
+    OPEN_LAYERS_JS = r"""
+    (layers) => {
+      // which of the slide's layers (index in the course data; 0 = base) the learner can see now
+      const open = [];
+      layers.forEach((ids, i) => {
+        if (!i) return;
+        for (const id of ids) {
+          for (const el of document.querySelectorAll('[data-model-id="' + id + '"]')) {
+            const lay = el.closest('.slide-layer');
+            if (lay && lay.classList.contains('base-layer')) continue;
+            const r = el.getBoundingClientRect(), cs = getComputedStyle(el);
+            if (r.width > 2 && r.height > 2 && cs.display !== 'none' && cs.visibility !== 'hidden'
+                && (!lay || (getComputedStyle(lay).display !== 'none' && !lay.classList.contains('hidden')))) { open.push(i); return; }
+          }
+        }
+      });
+      return open;
+    }"""
+
+    def _open_layers(self, page, slide):
+        if not slide or len(getattr(slide, "layer_objs", None) or []) < 2:
+            return set()
+        try:
+            return set(page.evaluate(self.OPEN_LAYERS_JS, slide.layer_objs))
+        except Exception:
+            return set()
+
+    def _items(self, page, slide):
+        """The clickable items a learner can see now (never the player's or the screen's own navigation)."""
         nav_boxes = [b for b in (self._box_of(page, o["id"]) for o in (slide.nav_objects if slide else [])) if b]
         inside = lambda o, b: b[0] <= o["x"] <= b[0] + b[2] and b[1] <= o["y"] <= b[1] + b[3]
         try:
@@ -1420,27 +1446,49 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                     c = {"x": b[0] + b[2] / 2, "y": b[1] + b[3] / 2}
                     if not any(inside(c, nb) for nb in nav_boxes) and not any(abs(c["x"] - o["x"]) < 8 and abs(c["y"] - o["y"]) < 8 for o in objs):
                         objs.append(self._as_obj(co["label"] or "", b))
-        objs = [o for o in objs if not re.match(r"^\s*(menu|help|notes|close|exit|resources|glossary)\b", o.get("label") or "", re.I)]
-        self._clicked_n = len(objs)
+        return [o for o in objs if not re.match(r"^\s*(menu|help|notes|close|exit|resources|glossary)\b", o.get("label") or "", re.I)]
+
+    def _unstick(self, page, sid, slide, retry):
+        """The way forward did nothing. A learner may first have to click the screen's tabs, hotspots or answers,
+        or close a pop-up. Try that, then try going forward again (retry). Returns the slide we end up on.
+        STANDARD for every clickable screen: each pop-up an item opens is played to the end of its own timeline
+        (and its narration) before it is closed, items that appear only after others were opened are clicked
+        too, and the screen itself is played to its end before Next is tried again."""
         self._fill_inputs(page)
-        if objs:
-            self.log(f"{self.label(sid)}: clicking {len(objs)} items on the screen before going on")
-        for o in objs:
-            self.check_time()
-            before = self._sig(self.state(page))
-            try:
-                page.mouse.click(o["x"], o["y"])
-            except Exception:
-                continue
-            page.wait_for_timeout(900)
-            st = self.state(page)
-            if self._moved(before, self._sig(st)):
-                got = self.identify(self.settle(page, 300))
-                if got != sid and not got.startswith("unknown"):
-                    return got   # that item was itself a way forward
-                # a pop-up opened: let its timeline play to the end (the item counts as visited only then)
-                self._play_popup(page)
-            self._close_any(page, slide)   # close the pop-up layer the item opened, if any
+        done, total = [], 0
+        for rnd in range(3):   # items revealed by earlier items are clicked in the next round
+            objs = [o for o in self._items(page, slide)
+                    if not any(abs(o["x"] - d["x"]) < 10 and abs(o["y"] - d["y"]) < 10 for d in done)]
+            if not objs:
+                break
+            if not rnd:
+                self.log(f"{self.label(sid)}: clicking {len(objs)} items on the screen before going on")
+            for o in objs:
+                self.check_time()
+                done.append(o)
+                total += 1
+                before = self._sig(self.state(page))
+                lay0 = self._open_layers(page, slide)
+                try:
+                    page.mouse.click(o["x"], o["y"])
+                except Exception:
+                    continue
+                page.wait_for_timeout(900)
+                st = self.state(page)
+                new_layers = self._open_layers(page, slide) - lay0
+                if self._moved(before, self._sig(st)) or new_layers:
+                    got = self.identify(self.settle(page, 300))
+                    if got != sid and not got.startswith("unknown"):
+                        self._clicked_n = total
+                        return got   # that item was itself a way forward
+                    # a pop-up opened: play its own timeline to the end (the item counts as visited only then)
+                    ms = max([slide.layer_ms[i] for i in new_layers if i < len(slide.layer_ms)] or [0]) if slide else 0
+                    self._play_popup(page, min_ms=ms)
+                    if not new_layers or self._open_layers(page, slide) & new_layers:
+                        self._close_any(page, slide)   # close the pop-up layer the item opened (if still open)
+                else:
+                    self._close_any(page, slide)
+        self._clicked_n = total
         self.seek_to_end(page)
         page.wait_for_timeout(600)
         if retry is None:
@@ -1453,18 +1501,22 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             return st["seekVal"] / st["seekMax"]
         return st.get("seekFill")
 
-    def _play_popup(self, page, limit=180):
+    def _play_popup(self, page, limit=180, min_ms=0):
         """Standard for every clickable: after it opens a pop-up / layer, wait until the seekbar inside it reaches
         the end (and its narration stops) before closing it – many courses enable Next only then.
         Stops early when the timeline stands still (it waits for a click) or there is nothing playing."""
-        t0, last, still = time.time(), None, 0
+        t0, last, still = time.time() - 0.9, None, 0   # the click was 0.9 s ago
         page.wait_for_timeout(800)
+        min_s = min(limit, (min_ms or 0) / 1000.0 + 0.5)   # the opened layer's own timeline length (course data)
         while time.time() - t0 < limit:
             self.check_time()
             st = self.state(page)
             f = self._seek_frac(st)
             playing = any(not m["paused"] for m in st["media"])
-            if not playing and (f is None or f >= 0.985):
+            if time.time() - t0 < min_s:   # the layer's timeline has not reached its end yet: keep playing
+                page.wait_for_timeout(1000)
+                continue
+            if not playing and (f is None or f >= 0.985 or min_ms):
                 break
             if f is not None and last is not None and abs(f - last) < 0.002 and not playing:
                 still += 1
@@ -1558,6 +1610,11 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             return False
         got = self.goto_slide(page, target)
         self._jumped = target if got == target else None
+        if got == target:
+            # the tester opened this screen directly, not the learner's way: its Back is not judged against sid
+            if not hasattr(self, "jump_edges"):
+                self.jump_edges = set()
+            self.jump_edges.add((sid, target))
         return got == target
 
     def prev_pass(self, browser):
@@ -1691,6 +1748,7 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                         self.col.add("navigation", "warning", "No Prev button on this slide", slide_id=b, slide_label=self.label(b))
                     continue
                 pshot, box, lab = self.shot(page, f"{b}_back"), back["box"], back["label"] or "Back arrow on the screen"
+                back_target = back.get("target")
                 before = self._sig(st)
                 self.click_box(page, back["box"])
             st2 = self.settle(page)
@@ -1717,7 +1775,10 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                              detail=f"Clicked the {'“' + lab + '” (Back)' if lab else 'player Back (PREV)'} button on {self.label(b)}.\n"
                                     f"Expected: {self.label(a)} opens.\nResult: the screen did not change.",
                              fix=f"Make this Back button open {self.label(a)}.")
-            elif new != a and not new.startswith("unknown") and not (slide and slide.prev_target == new):
+            elif new != a and not new.startswith("unknown") and not (slide and slide.prev_target == new) \
+                    and not (lab and locals().get("back_target") == new) and (a, b) not in getattr(self, "jump_edges", set()):
+                # (the Back arrow's own trigger opens that screen on purpose, e.g. back to a topic hub; and a screen the
+                #  tester opened directly has no learner "previous screen" to compare with)
                 self.col.add("navigation", "warning", "Prev went to a different slide than the one before it",
                              slide_id=b, slide_label=self.label(b), screenshot=pshot, box=box, vw=1366,
                              detail=f"Clicked the {'“' + lab + '” (Back)' if lab else 'player Back (PREV)'} button on {self.label(b)}.\n"
@@ -2008,9 +2069,10 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             for s in self.course.slides:
                 if s.id not in listed and not is_welcome(s):
                     self.col.add("menu", "info", "Slide is not listed in the menu", slide_id=s.id, slide_label=s.label)
-        moved = 0
+        moved, stayed = 0, []
         for idx, sid in sorted(self.menu_map.items()):
             self.check_time()
+            here0 = self.identify(self.state(page))
             self.current = sid
             got = self.goto_via_menu(page, sid)
             self.log(f"Menu: item {idx + 1} -> {self.label(got)}")
@@ -2018,6 +2080,10 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             if got is None or got.startswith("unknown"):
                 self.col.add("menu", "error", "Menu item did not open a recognisable slide", slide_id=sid,
                              slide_label=self.label(sid), screenshot=self.shot(page, f"{sid}_menu"))
+            elif got != sid and got == here0:
+                # nothing opened: the menu lets the learner open only screens already visited (a new session has
+                # visited none). Not "the wrong screen": judged together below and by the restrictions check
+                stayed.append((sid, self.shot(page, f"{sid}_menu")))
             elif got != sid:
                 self.col.add("menu", "error", "Menu item opened the wrong slide", slide_id=sid, slide_label=self.label(sid),
                              detail=f"Opened {self.label(got)}", screenshot=self.shot(page, f"{sid}_menu"))
@@ -2036,8 +2102,61 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                                  slide_id=sid, slide_label=self.label(sid), detail=it["text"])
         if moved == 0 and self.menu_map:
             self.col.add("menu", "info", "Menu navigation looks restricted (no item opened a slide)")
+        else:
+            for sid, shot in stayed:
+                self.col.add("menu", "info", "Menu item did not open (menu is locked until the screen is visited)",
+                             slide_id=sid, slide_label=self.label(sid), screenshot=shot)
         self.col.ran("menu")
         ctx.close()
+
+    LOOKS_BUTTON_JS = r"""
+    ([x, y, w, h]) => {
+      // {pointer: the learner sees a hand cursor on it, inline: a small icon inside a line of instructions
+      //  ("Click > to continue") rather than a button of its own}
+      const cx = x + w / 2, cy = y + h / 2;
+      let pointer = false;
+      for (let el = document.elementFromPoint(cx, cy); el && el !== document.body; el = el.parentElement) {
+        if (getComputedStyle(el).cursor === 'pointer') { pointer = true; break; }
+      }
+      let inline = false;
+      if (h <= 60 && w <= 90) {
+        for (const el of document.querySelectorAll('.slide-object-textbox, [data-acc-text], svg text, .text, p, span')) {
+          const r = el.getBoundingClientRect();
+          if (r.width < 4 || r.height < 4 || r.top > cy || r.bottom < cy) continue;
+          if (r.right < x - 40 || r.left > x + w + 40) continue;
+          if (r.left <= x && r.right >= x + w && r.width < w * 3) continue;   // the icon's own label
+          const t = (el.getAttribute('data-acc-text') || el.textContent || '').trim();
+          if (/\b(click|tap|select|press|to continue|to proceed)\b/i.test(t)) { inline = true; break; }
+        }
+      }
+      return {pointer, inline};
+    }"""
+
+    def _looks_dead_button(self, page, b):
+        """A click trigger with no action is a fault only on something a learner takes for a button: it shows the
+        hand cursor, is not a small icon inside a line of instructions ("Click > to continue"), and clicking it
+        really does nothing (some triggers live on the slide master or a layer)."""
+        try:
+            page.mouse.move(b[0] + b[2] / 2, b[1] + b[3] / 2)   # the player shows the hand cursor only on hover
+            page.wait_for_timeout(300)
+            r = page.evaluate(self.LOOKS_BUTTON_JS, b)
+        except Exception:
+            return False
+        if not r.get("pointer") or r.get("inline"):
+            return False
+        base, noise = self.fp_baseline(page)
+        sig = self._sig(self.state(page))
+        try:
+            page.mouse.click(b[0] + b[2] / 2, b[1] + b[3] / 2)
+        except Exception:
+            return False
+        page.wait_for_timeout(1200)
+        moved = self._moved(sig, self._sig(self.state(page)))
+        changed = moved or self.fp_changed(page, base, noise)
+        if moved and self.current and self.identify(self.state(page)) != self.current:
+            self.goto_slide(page, self.current)
+            self.settle_timeline(page)
+        return not changed
 
     def buttons_pass(self, browser):
         ctx = browser.new_context(viewport={"width": 1366, "height": 768}, device_scale_factor=2)
@@ -2106,7 +2225,8 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 b = self._visible_box(page, d["id"]) if isinstance(d, dict) else None
                 arrow = self._arrow_name(page, s, b) if b else None
                 last = s and s.index >= len(self.course.slides)
-                if b and not (sid in self.dead_back and arrow == "Back arrow") and not (last and arrow == "Next arrow"):
+                if b and not (sid in self.dead_back and arrow == "Back arrow") and not (last and arrow == "Next arrow") \
+                        and self._looks_dead_button(page, b):
                     self.col.add("buttons", "error", "Object has a click trigger with no action", slide_id=sid,
                                  slide_label=self.label(sid), detail=arrow or d.get("label") or "", box=b, vw=1366,
                                  screenshot=self.shot(page, f"{sid}_dead{d.get('id', '')}"))
@@ -2176,6 +2296,7 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 except Exception:
                     self._objs_before = []
                 self._no_before = self._named_box(page, ["no", "cancel", "not now"])
+                lay0 = self._open_layers(page, s)
                 try:
                     page.mouse.click(o["x"], o["y"])
                 except Exception:
@@ -2204,8 +2325,9 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 items.append(item)
                 btn_seen.setdefault(rkey, (sid, item))
                 if changed and len(ctx.pages) == n_pages and self.identify(self.state(page)) == sid:
-                    # let what the click opened play to its end (seekbar complete) before judging Next or closing it
-                    self._play_popup(page)
+                    # let what the click opened play to the end of its own timeline before judging Next or closing it
+                    new_layers = self._open_layers(page, s) - lay0
+                    self._play_popup(page, min_ms=max([s.layer_ms[i] for i in new_layers if s and i < len(s.layer_ms)] or [0]))
                     # what the click revealed (a layer, a tab): keep it, so text shown only there can be pictured
                     try:
                         lay = self.shot(page, f"{sid}_layer{k}")

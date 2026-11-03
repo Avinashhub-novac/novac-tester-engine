@@ -46,6 +46,8 @@ class Slide:
     audio: list = field(default_factory=list)       # relative paths of audio files
     video: list = field(default_factory=list)
     duration_ms: int = 0
+    layer_ms: list = field(default_factory=list)   # timeline length of every layer, in the player's order (base layer first)
+    layer_objs: list = field(default_factory=list)  # ids of the objects on every layer (same order), to see which layer is open
     next_target: str = ""   # slide id the Next trigger jumps to ("" = unknown)
     prev_target: str = ""
     is_quiz: bool = False
@@ -580,6 +582,10 @@ def load_course(extract_dir: Path) -> Course:
         s.audio = _media_refs(raw, AUDIO_EXT)
         s.video = _media_refs(raw, VIDEO_EXT)
         s.duration_ms = _duration(sj)
+        layers = [L for L in (sj.get("slideLayers") or []) if isinstance(L, dict)]
+        s.layer_ms = [int((L.get("timeline") or {}).get("duration") or 0) for L in layers]
+        s.layer_objs = [sorted({str(d["id"]) for _, d in _walk(L.get("objects") or []) if isinstance(d, dict) and "id" in d})[:40]
+                        for L in layers]
         s.next_target = _event_target(sj, {"onnextslide", "next"}, known - {s.id})
         s.prev_target = _event_target(sj, {"onprevslide", "prev"}, known - {s.id})
         s.is_quiz = _is_quiz(sj)
