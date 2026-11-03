@@ -2133,16 +2133,16 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
     }"""
 
     def _looks_dead_button(self, page, b):
-        """A click trigger with no action is a fault only on something a learner takes for a button: it shows the
-        hand cursor, is not a small icon inside a line of instructions ("Click > to continue"), and clicking it
-        really does nothing (some triggers live on the slide master or a layer)."""
+        """A click trigger with no action is a fault only on something a learner takes for a button: it is not a
+        small icon inside a line of instructions ("Click > to continue"), and clicking it really does nothing
+        (some triggers live on the slide master or a layer)."""
         try:
             page.mouse.move(b[0] + b[2] / 2, b[1] + b[3] / 2)   # the player shows the hand cursor only on hover
             page.wait_for_timeout(300)
             r = page.evaluate(self.LOOKS_BUTTON_JS, b)
         except Exception:
             return False
-        if not r.get("pointer") or r.get("inline"):
+        if r.get("inline"):   # (a missing hand cursor is not used: a dead button often has none, and is still dead)
             return False
         base, noise = self.fp_baseline(page)
         sig = self._sig(self.state(page))
