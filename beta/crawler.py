@@ -2327,6 +2327,7 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 if changed and len(ctx.pages) == n_pages and self.identify(self.state(page)) == sid:
                     # let what the click opened play to the end of its own timeline before judging Next or closing it
                     new_layers = self._open_layers(page, s) - lay0
+                    self._popup_layers = new_layers
                     self._play_popup(page, min_ms=max([s.layer_ms[i] for i in new_layers if s and i < len(s.layer_ms)] or [0]))
                     # what the click revealed (a layer, a tab): keep it, so text shown only there can be pictured
                     try:
@@ -2337,7 +2338,11 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                         self._overlap_check(page, sid, item["label"], seen_overlap, lay)
                     except Exception:
                         pass
-                    item["closed"] = self._close_popup(page, oshot, words0)
+                    if new_layers and not (self._open_layers(page, s) & new_layers):
+                        item["closed"] = True   # the pop-up closed itself at the end of its timeline
+                    else:
+                        item["closed"] = self._close_popup(page, oshot, words0)
+                    self._popup_layers = None
                     if item["closed"] is False:
                         self.col.add("interactivity", "error", "Pop-up does not close", slide_id=sid,
                                      slide_label=self.label(sid), detail=f"Opened from: {item['label']}",
@@ -2461,7 +2466,12 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
         seen_before = self._seen_words(page, before_rel)
         opened = self._seen_words(page) - seen_before
 
+        lays = getattr(self, "_popup_layers", None) or set()
+        slide_c = self.course.by_id(self.current) if self.current else None
+
         def gone():
+            if lays:   # the course data says which layer the click opened: closed when that layer is hidden again
+                return not (self._open_layers(page, slide_c) & lays)
             if opened:   # the words the pop-up showed must no longer be visible
                 left = opened & self._seen_words(page)
                 return len(left) <= 0.3 * len(opened)
