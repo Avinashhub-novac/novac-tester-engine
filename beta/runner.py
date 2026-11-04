@@ -217,7 +217,7 @@ class Run:
         play_min = sum(min(s.duration_ms, 600000) for s in course.slides) / 60000.0
         # pop-ups are played to the end of their own timelines (walk-through and buttons check): add that time
         layer_min = sum(min(ms, 120000) for s in course.slides for ms in (getattr(s, "layer_ms", None) or [])[1:]) / 60000.0
-        limit = min(config.MAX_CRAWL_MINUTES, max(20.0, 2 * play_min + 2 * layer_min + 10))
+        limit = min(config.MAX_CRAWL_MINUTES, max(30.0, 3 * play_min + 2 * layer_min + 15))
         self.log(f"Course running time about {play_min:.0f} min; the browser checks stop after {limit:.0f} min at the latest")
         crawler = Crawler(course, url, self.dir, self.col, play_full=opts.get("play_full", True),
                           max_minutes=limit, log=self.log, max_buttons=config.MAX_BUTTONS_PER_SLIDE)

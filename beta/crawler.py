@@ -1467,7 +1467,9 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 self.check_time()
                 done.append(o)
                 total += 1
-                before = self._sig(self.state(page))
+                st0 = self.state(page)
+                before = self._sig(st0)
+                bm = {m.get("src") for m in st0.get("media", []) if not m.get("paused")}
                 lay0 = self._open_layers(page, slide)
                 try:
                     page.mouse.click(o["x"], o["y"])
@@ -1483,7 +1485,7 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                         return got   # that item was itself a way forward
                     # a pop-up opened: play its own timeline to the end (the item counts as visited only then)
                     ms = max([slide.layer_ms[i] for i in new_layers if i < len(slide.layer_ms)] or [0]) if slide else 0
-                    self._play_popup(page, min_ms=ms)
+                    self._play_popup(page, min_ms=ms, base_media=bm)
                     if not new_layers or self._open_layers(page, slide) & new_layers:
                         self._close_any(page, slide)   # close the pop-up layer the item opened (if still open)
                 else:
@@ -1501,18 +1503,22 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             return st["seekVal"] / st["seekMax"]
         return st.get("seekFill")
 
-    def _play_popup(self, page, limit=180, min_ms=0):
+    def _play_popup(self, page, limit=180, min_ms=0, base_media=None):
         """Standard for every clickable: after it opens a pop-up / layer, wait until the seekbar inside it reaches
         the end (and its narration stops) before closing it – many courses enable Next only then.
         Stops early when the timeline stands still (it waits for a click) or there is nothing playing."""
         t0, last, still = time.time() - 0.9, None, 0   # the click was 0.9 s ago
+        # the screen's own narration that was already playing before the click is not the pop-up's: never wait for it
+        base_media = set(base_media or ())
+        if min_ms:
+            limit = min(limit, max(30.0, min_ms / 1000.0 + 20))   # never much longer than the pop-up's own timeline
         page.wait_for_timeout(800)
         min_s = min(limit, (min_ms or 0) / 1000.0 + 0.5)   # the opened layer's own timeline length (course data)
         while time.time() - t0 < limit:
             self.check_time()
             st = self.state(page)
             f = self._seek_frac(st)
-            playing = any(not m["paused"] for m in st["media"])
+            playing = any(not m["paused"] and m.get("src") not in base_media for m in st["media"])
             if time.time() - t0 < min_s:   # the layer's timeline has not reached its end yet: keep playing
                 page.wait_for_timeout(1000)
                 continue
@@ -2298,6 +2304,10 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 self._no_before = self._named_box(page, ["no", "cancel", "not now"])
                 lay0 = self._open_layers(page, s)
                 try:
+                    bm = {m.get("src") for m in self.state(page).get("media", []) if not m.get("paused")}
+                except Exception:
+                    bm = set()
+                try:
                     page.mouse.click(o["x"], o["y"])
                 except Exception:
                     continue
@@ -2328,7 +2338,8 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                     # let what the click opened play to the end of its own timeline before judging Next or closing it
                     new_layers = self._open_layers(page, s) - lay0
                     self._popup_layers = new_layers
-                    self._play_popup(page, min_ms=max([s.layer_ms[i] for i in new_layers if s and i < len(s.layer_ms)] or [0]))
+                    self._play_popup(page, min_ms=max([s.layer_ms[i] for i in new_layers if s and i < len(s.layer_ms)] or [0]),
+                                     base_media=bm)
                     # what the click revealed (a layer, a tab): keep it, so text shown only there can be pictured
                     try:
                         lay = self.shot(page, f"{sid}_layer{k}")

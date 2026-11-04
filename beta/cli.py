@@ -179,7 +179,7 @@ def cmd_merge(a):
             message=f"Not as per SB – {v.get('issue', 'content differs')}", slide_id=sid,
             slide_label=sl.get("label", v.get("time", "")), time=v.get("time", ""), detail="\n".join(details),
             suggestion=v.get("sb_says", "") if v.get("found_in") in ("OST", "Slide Title") else "",
-            found_in=v.get("found_in", "Content Flow"), locate=(v.get("course_says") or "")[:80],
+            found_in=v.get("found_in", "Content Flow"), locate=_cut((v.get("course_says") or "")),
             sb_says=v.get("sb_says", ""), sb_page=v.get("sb_page") or "",
             screenshot=_shot_for(sl, v.get("course_says", "")))
     slide_label = lambda sid: next((x.get("label") for x in res.get("slides", []) if x.get("id") == sid), "")
@@ -197,7 +197,7 @@ def cmd_merge(a):
                 details.append(v["explanation"])
             add(check=check, severity=v.get("severity") if v.get("severity") in ("error", "warning") else "warning",
                 message=v.get("issue", "Check this"), slide_id=sid, slide_label=slide_label(sid), detail="\n".join(details),
-                suggestion=v.get("suggestion", ""), fix=v.get("suggestion", ""), course_says=v.get("quote", ""), locate=(v.get("quote") or "")[:80],
+                suggestion=v.get("suggestion", ""), fix=v.get("suggestion", ""), course_says=v.get("quote", ""), locate=_cut((v.get("quote") or "")),
                 found_in=FOUND.get(str(v.get("found_in") or "").lower(), ""),
                 screenshot=next((x.get("shot", "") for x in res.get("slides", []) if x.get("id") == sid), ""))
     rules = {r["rule"]: r["text"] for r in (tasks.get("sb_review") or {}).get("rules", [])}
@@ -239,7 +239,7 @@ def cmd_merge(a):
         add(check="style_guide", severity=v.get("severity") if v.get("severity") in ("error", "warning") else "warning",
             message=(f"SB: {v.get('issue', 'Not as per the style guide')}" if sb_stage else v.get("issue", "Not as per the style guide")),
             slide_id=sid, slide_label=(f"Page {page}" if sb_stage and page else slide_label(sid)), detail="\n".join(details),
-            suggestion=v.get("suggestion", ""), fix=v.get("suggestion", ""), course_says=q, locate=q[:80],
+            suggestion=v.get("suggestion", ""), fix=v.get("suggestion", ""), course_says=q, locate=_cut(q),
             sb_says=q if sb_stage else "", sb_page=page or 0, sb_only=sb_stage, assigned_to="ID" if sb_stage else "",
             found_in="Style guide", rule=rule,
             screenshot="" if sb_stage else next((x.get("shot", "") for x in res.get("slides", []) if x.get("id") == sid), ""))
@@ -255,29 +255,54 @@ def cmd_merge(a):
     print(f"merged {added} findings")
 
 
+_PUA = re.compile(r"[\ue000-\uf8ff]")
+
+
+def _word_eq(screen, want):
+    """Same word? Some fonts draw ligatures (fi, ff, f…) as private glyphs, so "of" can reach the page as "o\ue000":
+    such a glyph stands for one to three letters."""
+    if screen == want:
+        return True
+    if not _PUA.search(screen):
+        return False
+    pat = "".join("[^\\W\\d_]{1,3}" if _PUA.match(ch) else re.escape(ch) for ch in screen)
+    return re.fullmatch(pat, want) is not None
+
+
 def _norm_word(w):
-    return re.sub(r"[^\w'\u0900-\u097f\u0a00-\u0a7f\u0b80-\u0bff\u0c00-\u0cff\u0d00-\u0d7f\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]+", "", w.lower())
+    return re.sub(r"[^\w'\ue000-\uf8ff\u0900-\u097f\u0a00-\u0a7f\u0b80-\u0bff\u0c00-\u0cff\u0d00-\u0d7f\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]+", "", w.lower())
 
 
 def _find_text_box(tb, needle):
-    """Tight box around `needle` (one or more words) on the slide; falls back to the text block."""
+    """Tight box around `needle` (one or more words) on the slide; falls back to the text block. When the words are
+    on the screen twice (e.g. on a card and again in the open transcript panel), the shortest text block wins: the
+    card, not the long transcript."""
     if isinstance(tb, list):  # older format: blocks only
         tb = {"nodes": tb, "words": []}
     want = [_norm_word(w) for w in (needle or "").split() if _norm_word(w)]
     if not want:
         return None
-    words = tb.get("words", [])
+    words, nodes = tb.get("words", []), tb.get("nodes", [])
+    norm = [_norm_word(x["w"]) for x in words]
+    best = None
     for i in range(len(words) - len(want) + 1):
-        seq = words[i:i + len(want)]
-        if [_norm_word(x["w"]) for x in seq] == want:
-            xs = [x["b"] for x in seq]
-            x0, y0 = min(b[0] for b in xs), min(b[1] for b in xs)
-            x1, y1 = max(b[0] + b[2] for b in xs), max(b[1] + b[3] for b in xs)
-            return [x0, y0, x1 - x0, y1 - y0]
-    flat = " ".join(want)
-    hits = [b for b in tb.get("nodes", []) if flat in " ".join(_norm_word(w) for w in b["t"].split())]
+        if all(_word_eq(norm[i + k], w) for k, w in enumerate(want)):
+            seq = words[i:i + len(want)]
+            n = seq[0].get("n")
+            size = len(nodes[n]["t"]) if isinstance(n, int) and n < len(nodes) else 10 ** 6
+            if best is None or size < best[0]:
+                xs = [x["b"] for x in seq]
+                x0, y0 = min(b[0] for b in xs), min(b[1] for b in xs)
+                x1, y1 = max(b[0] + b[2] for b in xs), max(b[1] + b[3] for b in xs)
+                best = (size, [x0, y0, x1 - x0, y1 - y0])
+    if best:
+        return best[1]
+    hits = []
+    for b in nodes:
+        nw = [_norm_word(w) for w in b["t"].split() if _norm_word(w)]
+        if any(all(_word_eq(nw[j + k], w) for k, w in enumerate(want)) for j in range(len(nw) - len(want) + 1)):
+            hits.append(b)
     return min(hits, key=lambda b: b["b"][2] * b["b"][3])["b"] if hits else None
-
 
 def _line_boxes(tb, needle):
     """The words of `needle` on the screen, one tight box per line of text (so a quote that wraps is marked on
@@ -285,10 +310,12 @@ def _line_boxes(tb, needle):
     if isinstance(tb, list):
         tb = {"nodes": tb, "words": []}
     want = [_norm_word(w) for w in (needle or "").split() if _norm_word(w)]
-    words = (tb or {}).get("words", [])
-    for i in range(len(words) - len(want) + 1):
-        seq = words[i:i + len(want)]
-        if want and [_norm_word(x["w"]) for x in seq] == want:
+    words, nodes = (tb or {}).get("words", []), (tb or {}).get("nodes", [])
+    size = lambda q: len(nodes[q[0].get("n")]["t"]) if isinstance(q[0].get("n"), int) and q[0]["n"] < len(nodes) else 10 ** 6
+    matches = [words[i:i + len(want)] for i in range(len(words) - len(want) + 1)
+               if want and all(_word_eq(_norm_word(x["w"]), w) for x, w in zip(words[i:i + len(want)], want))]
+    for seq in sorted(matches, key=size)[:1]:   # the shortest text block (a card, not the transcript panel)
+        if True:
             lines = []
             for x in seq:
                 b = x["b"]
@@ -492,6 +519,14 @@ def _side_by_side(a, b, out, cap_a, cap_b):
         d.text((x + 14, 8), text[:70], font=_font(30), fill=(255, 255, 255))
         im.paste(img, (x, cap))
     im.save(out, "JPEG", quality=88, optimize=True)
+
+
+def _cut(text, limit=80):
+    """The start of a quote, to find it on the screen: whole words only (a word cut in half never matches)."""
+    t = " ".join((text or "").split())
+    if len(t) <= limit:
+        return t
+    return t[:limit].rsplit(" ", 1)[0]
 
 
 def _needle(f):

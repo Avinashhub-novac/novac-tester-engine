@@ -215,17 +215,39 @@ TEXTBOX_JS = r"""
     }
     return false;
   };
+  // is element `e` (hit at a point) painted above slide object `t`? Text in newer players takes no clicks, so
+  // the browser lists the shapes BELOW the text first: compare layers and stacking order, never trust the list order
+  const layerOf = o => o && o.closest ? o.closest('.slide-layer') : null;
+  const zOf = o => { const v = parseInt(getComputedStyle(o).zIndex, 10); return isNaN(v) ? 0 : v; };
+  const above = (e, t) => {
+    const eo = e.closest ? e.closest('.slide-object') : null;
+    const to = t.closest ? (t.closest('.slide-object') || t) : t;
+    if (!eo) {
+      // not a slide object: the slide background or a container is below; anything outside the slide (a player
+      // window or message box) is above
+      const slide = (layerOf(to) || {}).parentElement;
+      return !(slide && slide.contains(e)) && !e.contains(to);
+    }
+    if (eo === to || eo.contains(to) || to.contains(eo)) return false;
+    const le = layerOf(eo), lt = layerOf(to);
+    if (le && lt && le !== lt) {   // another layer: the base layer is at the bottom, later layers above earlier ones
+      if (le.classList.contains('base-layer')) return false;
+      if (lt.classList.contains('base-layer')) return true;
+      return !!(lt.compareDocumentPosition(le) & Node.DOCUMENT_POSITION_FOLLOWING);
+    }
+    const ze = zOf(eo), zt = zOf(to);
+    if (ze !== zt) return ze > zt;
+    return !!(to.compareDocumentPosition(eo) & Node.DOCUMENT_POSITION_FOLLOWING);
+  };
   const hiddenUnder = (target, r) => {
     if (!target) return false;
     const x = r.x + r.width / 2, y = r.y + r.height / 2;
     if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) return false;
     const stack = document.elementsFromPoint(x, y);
-    const at = stack.findIndex(e => e === target || target.contains(e) || e.contains(target));
-    if (at < 0) return true;   // nothing of it is at that spot: something else is drawn there
-    for (let k = 0; k < at; k++) {
-      const e = stack[k];
-      if (e.closest('.acc-shadow-dom, .acc-shadow-el, [class*="acc-shadow"]')) continue;
-      if (solid(e)) return true;
+    for (const e of stack) {
+      if (e === target || target.contains(e) || e.contains(target)) break;
+      if (e.closest('.acc-shadow-dom, .acc-shadow-el, [class*="acc-shadow"], .acc-blocker')) continue;
+      if (solid(e) && above(e, target)) return true;
     }
     return false;
   };
@@ -245,6 +267,8 @@ TEXTBOX_JS = r"""
     return true;
   };
   const visualOf = el => {
+    // newer players put the screen-reader text on the slide object itself
+    if (el.classList && el.classList.contains('slide-object') && el.getAttribute('data-model-id')) return el;
     const id = (el.getAttribute('data-represents') || '').split('.').pop() || (el.id || '').replace(/^acc-/, '');
     return id ? document.querySelector('.slide-object[data-model-id="' + id + '"]') : null;
   };
