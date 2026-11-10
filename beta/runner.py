@@ -493,6 +493,8 @@ class Run:
                 # the assessment has no Next / Previous (it moves on as questions are answered); results need no menu
                 for k_ in ("next", "back", "swipe_next", "swipe_back"):
                     row[k_] = "N/A (assessment)"
+                if next_f:   # the feedback's own Continue / Try again does nothing: the learner cannot move on
+                    row["next"] = "Fail – " + plain(next_f[0].message)[0]
                 if s.id in crawler.results_ids:
                     row["menu"] = "N/A (not needed)"
                 row["notes"] = (row["notes"] + "; " if row["notes"] else "") + "Assessment screen: no Back/Next expected"

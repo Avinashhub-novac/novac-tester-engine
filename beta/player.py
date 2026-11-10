@@ -368,8 +368,21 @@ OPTIONS_JS = r"""
     out.push({ label, box: [r.x, r.y, r.width, r.height], checked, mid: holder ? holder.getAttribute('data-model-id') : rep,
                disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true' });
   });
-  out.sort((a, b) => (a.box[1] - b.box[1]) || (a.box[0] - b.box[0]));
-  return out;
+  // one answer is often made of several accessible parts (its text, its row and its radio button), each marked as a radio:
+  // parts lying on each other are one option (the biggest part is clicked; checked when any part is)
+  const inter = (p, q) => Math.max(0, Math.min(p[0] + p[2], q[0] + q[2]) - Math.max(p[0], q[0])) *
+                          Math.max(0, Math.min(p[1] + p[3], q[1] + q[3]) - Math.max(p[1], q[1]));
+  const groups = [];
+  for (const o of out.sort((a, b) => b.box[2] * b.box[3] - a.box[2] * a.box[3])) {
+    const g = groups.find(g => inter(g.box, o.box) >= 0.6 * Math.min(g.box[2] * g.box[3], o.box[2] * o.box[3]));
+    if (!g) { groups.push(Object.assign(o, { mids: o.mid ? [o.mid] : [] })); continue; }
+    g.checked = g.checked || o.checked;
+    if (o.mid) g.mids.push(o.mid);
+    if (!g.label && o.label) g.label = o.label;
+    g.disabled = g.disabled && o.disabled;
+  }
+  groups.sort((a, b) => (a.box[1] - b.box[1]) || (a.box[0] - b.box[0]));
+  return groups;
 }
 """
 

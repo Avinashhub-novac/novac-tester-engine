@@ -69,6 +69,19 @@ def stated_rules(text):
     return out
 
 
+def _near(a, b):
+    """At most one edit apart, or two neighbouring letters swapped (SUMBIT for SUBMIT)."""
+    if a == b:
+        return True
+    if len(a) == len(b):
+        d = [i for i in range(len(a)) if a[i] != b[i]]
+        return len(d) == 1 or (len(d) == 2 and d[1] == d[0] + 1 and a[d[0]] == b[d[1]] and a[d[1]] == b[d[0]])
+    if abs(len(a) - len(b)) != 1:
+        return False
+    s, l = (a, b) if len(a) < len(b) else (b, a)
+    return any(l[:i] + l[i + 1:] == s for i in range(len(l)))
+
+
 class QuizMixin:
     """Mixed into the Crawler."""
 
@@ -99,11 +112,12 @@ class QuizMixin:
                 page.mouse.click(o["x"], o["y"])
                 page.wait_for_timeout(900)
                 return o["label"]
-        b = self._named_box(page, words)   # a button drawn as a shape on the slide
-        if b:
-            self.click_box(page, b)
-            page.wait_for_timeout(900)
-            return words[0]
+        for txt in words:   # a button drawn as a shape on the slide (its own word is returned, for the report)
+            b = self._named_box(page, [txt])
+            if b:
+                self.click_box(page, b)
+                page.wait_for_timeout(900)
+                return txt
         return None
 
     def _region_changed(self, before_png, page, box):
@@ -147,7 +161,7 @@ class QuizMixin:
         sub = self._submit_box(page)
         if sub:
             self.click_box(page, sub)
-        elif not self._click_named(page, ["submit", "check", "check answer", "done"]):
+        elif not self._click_named(page, ["submit", "check", "check answer", "done"]) and not self._click_misspelled_submit(page):
             return "No Submit button", ""
         page.wait_for_timeout(1500)
         after = self._screen_text(page)
@@ -163,11 +177,73 @@ class QuizMixin:
             return "Correct", txt[:200]
         return "No feedback", txt[:200]
 
-    def leave_feedback(self, page, sid):
-        """Closes the feedback / goes on (Continue, OK, Next). Returns the slide now showing."""
-        self._click_named(page, ["continue", "ok", "close", "next", "proceed"])
+    def _same_screen(self, page, before_png, before_text):
+        """Nothing changed on screen: the same words and (almost) the same picture."""
+        if set(self._screen_text(page).split()) != set((before_text or "").split()):
+            return False
+        if before_png is None:
+            return True
+        try:
+            from io import BytesIO
+            from PIL import Image, ImageChops
+            a = Image.open(BytesIO(before_png)).convert("L")
+            b = Image.open(BytesIO(page.screenshot())).convert("L")
+            d = ImageChops.difference(a, b).point(lambda v: 255 if v > 30 else 0)
+            return sum(1 for v in d.getdata() if v) < 0.003 * d.width * d.height
+        except Exception:
+            return True
+
+    FEEDBACK_ACTION = {"continue": "the next screen opens (or the feedback closes)", "proceed": "the next screen opens",
+                       "ok": "the feedback closes", "close": "the feedback closes",
+                       "try again": "the feedback closes so the learner can answer again"}
+
+    def _dead_feedback_button(self, page, sid, name):
+        seen = self.__dict__.setdefault("_dead_fb", set())
+        if (sid, name) in seen:
+            return
+        seen.add((sid, name))
+        nice = name.title() if name != "ok" else "OK"
+        shot = self.shot(page, f"{sid}_deadfb_{len(seen)}")
+        self.col.add("navigation", "error", f"{nice} button not working: “{nice}” on the feedback does nothing",
+                     slide_id=sid, slide_label=self.label(sid), screenshot=shot, box=self._named_box(page, [name]), vw=1366,
+                     found_in="Assessment",
+                     detail=(f"Answered {self.label(sid)}; the feedback opened with the “{nice}” button.\n"
+                             f"Clicked “{nice}” (again after the feedback finished playing).\n"
+                             f"Expected: {self.FEEDBACK_ACTION.get(name, 'something happens')}.\n"
+                             f"Result: nothing happens – the learner is stuck on the feedback."),
+                     fix=f"Give the “{nice}” button its action ({self.FEEDBACK_ACTION.get(name, 'move on')}).")
+
+    def _click_misspelled_submit(self, page):
+        """A Submit button whose label is spelled wrongly (SUMBIT, SUBMT …) – the spelling is reported elsewhere."""
+        for o in self._clickables(page):
+            w = re.sub(r"[^a-z]", "", (o.get("label") or "").lower())
+            if 4 <= len(w) <= 8 and w != "submit" and _near(w, "submit"):
+                page.mouse.click(o["x"], o["y"])
+                page.wait_for_timeout(900)
+                return o["label"]
+        return None
+
+    def leave_feedback(self, page, sid, words=None, move_on=True):
+        """Closes the feedback / goes on (Continue, OK, Next). Returns the slide now showing.
+        A feedback button (Continue, OK, Close, Proceed, Try again) that is clicked and does nothing is reported."""
+        try:
+            before_png, before_text = page.screenshot(), self._screen_text(page)
+        except Exception:
+            before_png, before_text = None, ""
+        name = self._click_named(page, words or ["continue", "ok", "close", "next", "proceed"])
         st = self.settle(page, 600)
         here = self.identify(st)
+        name = (name or "").strip().lower()
+        if here == sid and name in self.FEEDBACK_ACTION and self._same_screen(page, before_png, before_text):
+            # it may only work once the feedback has played: let it finish and click once more before judging
+            self.settle_timeline(page)
+            self._click_named(page, [name])
+            st = self.settle(page, 1500)
+            here = self.identify(st)
+            if here == sid and self._same_screen(page, before_png, before_text):
+                self._dead_feedback_button(page, sid, name)
+        if not move_on:
+            return here
         if here == sid and st["nextExists"] and not st["nextDisabled"]:
             self.click_first(page, SEL["next"])
             here = self.identify(self.settle(page))
@@ -339,7 +415,7 @@ class QuizMixin:
         opts = self._options(page)
         obj = q.choices[k]["obj"] if k < len(q.choices) else ""
         for i, o in enumerate(opts):
-            if o.get("mid") and o["mid"] == obj:
+            if o.get("mid") and (o["mid"] == obj or obj in (o.get("mids") or [])):
                 return i, opts
         return (k if k < len(opts) else None), opts
 
@@ -637,6 +713,8 @@ class QuizMixin:
                         {"shot": rec["shot"], "boxes": page.evaluate(TEXTBOX_JS)})
                 except Exception:
                     pass
+                if fb in ("Correct", "Incorrect"):   # the feedback's own button (Continue, Try again …) must work
+                    self.leave_feedback(page, q.id, words=["continue", "try again", "ok", "close", "proceed"], move_on=False)
             sel = [r for r in qi["options"] if r["selectable"]]
             qi["key"] = [k for k, r in enumerate(qi["options"]) if r["feedback"] == "Correct"]
             if sel and all(r["feedback"] == "No feedback" for r in sel):
