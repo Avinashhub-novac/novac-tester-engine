@@ -1831,7 +1831,7 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
         n = next((n for n in self._text_nodes(page) if self.MENU_WORD.match(n["t"])), None)
         if n:
             return self._as_obj(n["t"], n["b"])
-        return self._icon_menu_button(page)
+        return self._icon_menu_button(page) or self._probe_icon_menu(page)
 
     def _menu_links(self, slide):
         """Topic links of a course menu built into the screens: buttons on the slide that each open a different
@@ -1874,6 +1874,50 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                 self._menu_icon_id = cid
                 self.log(f"Menu: the course menu opens from an icon on {self.label(sid)}")
                 return self._as_obj("Menu", b)
+        return None
+
+    MENU_PROBE_SKIP = re.compile(r"(exit|close|quit|help|glossary|resource|transcript|audio|sound|volume|mute|replay|"
+                                 r"play|pause|next|prev|back|submit|caption|\bcc\b|home|print|download|fullscreen)", re.I)
+
+    def _probe_icon_menu(self, page):
+        """A Menu drawn as an unnamed icon in the screen's title bar (e.g. a grid of squares) whose topic list is not in
+        the course data as links: each small unnamed icon at the top is clicked like a learner would; the one that shows
+        two or more of the course's screen titles is the menu. Exit, Help and similar named buttons are never clicked."""
+        hit = getattr(self, "_menu_probe", None)
+        if hit:
+            o = min(self._clickables(page), default=None, key=lambda o: abs(o["x"] - hit[0]) + abs(o["y"] - hit[1]))
+            if o and abs(o["x"] - hit[0]) + abs(o["y"] - hit[1]) < 24:
+                return self._as_obj("Menu", self._obox(o))
+            return None
+        if getattr(self, "_menu_probes", 0) >= 3:
+            return None
+        titles = {_norm(x.title) for x in self.course.slides if x.title and len(_norm(x.title)) > 3}
+        if len(titles) < 3:
+            return None
+        vh = (page.viewport_size or {}).get("height", 768)
+        cands = sorted([o for o in self._clickables(page) if o["y"] < 0.25 * vh and o["w"] <= 140 and o["h"] <= 140
+                        and not self.MENU_PROBE_SKIP.search(o.get("label") or "")], key=lambda o: o["x"])
+        if not cands:
+            return None
+        self._menu_probes = getattr(self, "_menu_probes", 0) + 1
+        sid = self.identify(self.state(page))
+        try:   # an Exit icon with no name must not end the session
+            page.evaluate("() => { try { window.close = () => {}; window.top.close = () => {}; } catch (e) {} }")
+        except Exception:
+            pass
+        before = {_norm(n["t"]) for n in self._text_nodes(page)}
+        need = max(2, min(3, len(titles) // 2))
+        for o in cands[:5]:
+            self.click_box(page, self._obox(o))
+            page.wait_for_timeout(1200)
+            new = {_norm(n["t"]) for n in self._text_nodes(page)} - before
+            shown = sum(1 for t in titles if any(t == x or (len(t) > 8 and t in x) for x in new))
+            self.jump(page, sid)   # put the screen back as it was (the menu may also be a screen of its own)
+            self.settle_timeline(page)
+            if shown >= need:
+                self._menu_probe = (o["x"], o["y"])
+                self.log(f"Menu: the course menu opens from an icon in the title bar of {self.label(sid)}")
+                return self._as_obj("Menu", self._obox(o))
         return None
 
     def open_custom_menu(self, page):
