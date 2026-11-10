@@ -1722,6 +1722,7 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             page = self.open(ctx, "resume")
             if not self.can_jump(page):
                 self.resume["note"] = "The screens could not be opened directly in this player"
+                ctx.close()
                 return
             # walk the first screens like a learner, then stop in the middle
             for x in cand[: cand.index(target) + 1]:
@@ -1730,10 +1731,14 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             page.wait_for_timeout(3000)   # the player saves its position a moment after the screen opens
             lms = page.evaluate(LMS_JS) or {}
             store = dict(lms.get("store") or {})
-        finally:
+            page.close()   # the learner leaves; the browser keeps what the course saved in it (courses published for the web)
+        except Exception:
             ctx.close()
+            raise
+        lms_used = any(c.get("fn") == "Initialize" for c in (lms.get("calls") or []))
         saved = any(store.get(k) for k in ("cmi.core.lesson_location", "cmi.location", "cmi.suspend_data"))
-        if not saved:
+        if lms_used and not saved:
+            ctx.close()
             self.resume = {"result": "Fail", "note": "The course sends no bookmark to the LMS"}
             self.col.add("navigation", "error", "The course does not save where the learner is (no bookmark)",
                          slide_id=target, slide_label=self.label(target), found_in="Navigation",
@@ -1741,7 +1746,6 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                                 "suspend data) to the LMS.\nResult: nothing was sent, so a learner who leaves starts again.",
                          fix="Turn on resume (bookmarking) in the publish settings: Resume on restart.")
             return
-        ctx = browser.new_context(viewport={"width": 1366, "height": 768}, device_scale_factor=2)
         try:
             import json as _json
             page = ctx.new_page()

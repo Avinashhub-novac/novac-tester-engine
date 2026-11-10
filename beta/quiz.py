@@ -257,7 +257,7 @@ class QuizMixin:
                              detail=f"Answered {self.label(sid)} and closed the feedback.\nExpected: Next opens so the learner can go on.\n"
                                     "Result: Next stays locked – the learner is stuck on the question.",
                              fix="Unlock Next once the question is answered (or move on when the feedback closes).")
-        elif here != sid or st["nextExists"]:
+        elif here != sid or (st["nextExists"] and not st["nextDisabled"]):
             self.kc_nav.setdefault(sid, {}).setdefault("next_after", True)
         if here == sid and st["nextExists"] and not st["nextDisabled"]:
             self.click_first(page, SEL["next"])

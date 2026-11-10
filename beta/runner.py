@@ -555,13 +555,14 @@ class Run:
                       "Player and title-bar buttons (Menu, Resources, Help, Glossary, Volume, Captions, Exit)"):
                 items.append((t, "Not tested", "Not in this stage (clickables not selected)"))
         kc = [x for x in crawler.quiz_ids]
+        kc_ran = any(x in crawler.kc_nav for x in kc)
         if kc:
             items.append(("Knowledge-check feedback buttons (Continue, Try again, OK, Close) work",) +
-                         from_f(has(("navigation",), r"on the feedback does nothing"), bool(crawler.assessment) or bool(crawler.kc_nav),
+                         from_f(has(("navigation",), r"on the feedback does nothing"), bool(crawler.assessment) or kc_ran,
                                 stopped or "The questions were not reached"))
             items.append(("Knowledge check: Next stays locked until answered and opens after the right answer",) +
                          from_f(has(("navigation",), r"before the question is answered|stays locked after the question"),
-                                bool(crawler.kc_nav), stopped or "The questions were not answered in the walk-through"))
+                                kc_ran, stopped or "The questions were not answered in the walk-through"))
         else:
             items.append(("Knowledge-check feedback buttons and Next after answering", "N/A", "No question screens in this course"))
         res = getattr(crawler, "resume", None) or {}
