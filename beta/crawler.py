@@ -108,6 +108,9 @@ class Crawler(QuizMixin):
         self.check_completion = True   # Beta only: read what the course reports to the LMS at the end
         self.blocked = None       # {sid, reason}: the learner cannot go past this screen, so testing stopped there
         self.dead_back = set()    # screens whose Back arrow does nothing (already reported as a Back failure)
+        self.kc_nav, self.kc_locked = {}, set()   # question screens: Next before / after answering
+        self.back_off = set()     # screens whose Back is switched off (shown greyed out)
+        self.capped = {}          # slide id -> (tested, found) when a screen has more clickables than are tested
         self.run_menu = True      # the menu is part of this test (set from the passes)
         self.menu_done = False    # the course's own menu was already tested at the end of the Next walk
         self.assessment = None    # what the assessment pass found (questions, options, scenarios)
@@ -1700,6 +1703,85 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             sid = new
         ctx.close()
 
+    RESUME_YES = ("Yes", "Resume", "Continue", "Resume course", "Continue where you left off")
+
+    def resume_pass(self, browser):
+        """A learner leaves in the middle of the course and comes back: the course must save where the learner was
+        (the bookmark sent to the LMS) and, when it is opened again with that data, return to that screen."""
+        self.resume = {"result": "Not tested", "note": ""}
+        ids = set(self.course.ids())
+        n_all = len(self.course.slides)
+        cand = [x for x in self.order if x in ids and x not in self.assess_ids and not is_welcome(self.course.by_id(x))
+                and not is_end(self.course.by_id(x), n_all)]
+        if len(cand) < 2:
+            self.resume["note"] = "Too few content screens to leave in the middle"
+            return
+        target = cand[len(cand) // 2]
+        ctx = browser.new_context(viewport={"width": 1366, "height": 768}, device_scale_factor=2)
+        try:
+            page = self.open(ctx, "resume")
+            if not self.can_jump(page):
+                self.resume["note"] = "The screens could not be opened directly in this player"
+                return
+            # walk the first screens like a learner, then stop in the middle
+            for x in cand[: cand.index(target) + 1]:
+                self.jump(page, x)
+            self.settle_timeline(page)
+            page.wait_for_timeout(3000)   # the player saves its position a moment after the screen opens
+            lms = page.evaluate(LMS_JS) or {}
+            store = dict(lms.get("store") or {})
+        finally:
+            ctx.close()
+        saved = any(store.get(k) for k in ("cmi.core.lesson_location", "cmi.location", "cmi.suspend_data"))
+        if not saved:
+            self.resume = {"result": "Fail", "note": "The course sends no bookmark to the LMS"}
+            self.col.add("navigation", "error", "The course does not save where the learner is (no bookmark)",
+                         slide_id=target, slide_label=self.label(target), found_in="Navigation",
+                         detail=f"Opened {self.label(target)} and waited.\nExpected: the course sends its position (bookmark / "
+                                "suspend data) to the LMS.\nResult: nothing was sent, so a learner who leaves starts again.",
+                         fix="Turn on resume (bookmarking) in the publish settings: Resume on restart.")
+            return
+        ctx = browser.new_context(viewport={"width": 1366, "height": 768}, device_scale_factor=2)
+        try:
+            import json as _json
+            page = ctx.new_page()
+            page.add_init_script(f"window.__betaSeed = {_json.dumps(store)};")
+            page.add_init_script(INIT_SCRIPT)
+            self.wire(page, "resume")
+            page.goto(self.url, wait_until="load", timeout=90000)
+            self._enter_frame(page)
+            for _ in range(60):
+                st = self.state(page)
+                if st["nextExists"] or st["slideIds"] or len(st["text"]) > 20:
+                    break
+                page.wait_for_timeout(500)
+            page.wait_for_timeout(1500)
+            prompt = None
+            for txt in self.RESUME_YES:   # "Would you like to resume where you left off?"
+                try:
+                    b = page.get_by_role("button", name=re.compile(rf"^{txt}$", re.I))
+                    if b.count() and b.first.is_visible():
+                        b.first.click(timeout=1500)
+                        prompt = txt
+                        break
+                except Exception:
+                    continue
+            here = self.identify(self.settle(page, 2500))
+            shot = self.shot(page, f"{target}_resume")
+        finally:
+            ctx.close()
+        if here == target:
+            self.resume = {"result": "Pass", "note": f"Returned to {self.label(target)}" + (f" after “{prompt}”" if prompt else "")}
+            self.col.ran("navigation")
+            return
+        self.resume = {"result": "Fail", "note": f"Opened {self.label(here)} instead of {self.label(target)}"}
+        self.col.add("navigation", "error", "Course does not resume at the screen where the learner left",
+                     slide_id=target, slide_label=self.label(target), screenshot=shot, vw=1366, found_in="Navigation",
+                     detail=f"Left the course on {self.label(target)}, then opened it again with the saved bookmark"
+                            + (f" and chose “{prompt}”" if prompt else " (no resume prompt was shown)") +
+                            f".\nExpected: {self.label(target)} opens.\nResult: {self.label(here)} opened.",
+                     fix="Set the player to resume on restart and check the bookmark is restored.")
+
     def can_jump(self, page):
         try:
             return bool(page.evaluate("() => !!(window.DS && DS.windowManager && DS.windowManager.onRequestingSlide)"))
@@ -1728,7 +1810,8 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                     page.wait_for_timeout(1500)
                     st = self.state(page)
                 if st["prevDisabled"]:
-                    continue   # Back is switched off on purpose here
+                    self.back_off.add(b)   # shown in the navigation table as switched off (never silent)
+                    continue
                 pshot, box, lab = self.shot(page, f"{b}_prev"), st.get("prevBox"), None
                 before = self._sig(st)
                 self.click_first(page, SEL["prev"])
@@ -2284,7 +2367,9 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             self._overlap_check(page, sid, "", seen_overlap)
             nav_boxes = [b for b in (self._box_of(page, o["id"]) for o in (s.nav_objects if s else [])) if b]
             inside = lambda o, b: b[0] <= o["x"] <= b[0] + b[2] and b[1] <= o["y"] <= b[1] + b[3]
-            objs = [o for o in page.evaluate(CLICKABLES_JS, SEL) if not any(inside(o, b) for b in nav_boxes)][: self.max_buttons]
+            objs = [o for o in page.evaluate(CLICKABLES_JS, SEL) if not any(inside(o, b) for b in nav_boxes)]
+            n_found = len(objs)
+            objs = objs[: self.max_buttons]
             if not objs and s:
                 # the page gives no clickable hints (common in newer Storyline output): use the course's own list of
                 # objects with click triggers, found on screen by their id
@@ -2295,6 +2380,7 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
                     b = self._visible_box(page, co["id"])   # only what a learner can see (not under a layer)
                     if b and not any(inside({"x": b[0] + b[2] / 2, "y": b[1] + b[3] / 2}, nb) for nb in nav_boxes):
                         objs.append(self._as_obj(co["label"] or "", b))
+                n_found = len(objs)
                 objs = objs[: self.max_buttons]
             if s and s.drag_items:   # drag items are dragged (walk-through / assessment), not clicked
                 dboxes = [b for b in (self._box_of(page, x["id"]) for x in s.drag_items + s.drop_targets) if b]
@@ -2302,6 +2388,12 @@ h2{{font-size:14px;margin:18px 0 0}}</style>
             if sid in self.quiz_ids or sid in self.results_ids or (s and s.is_quiz):
                 objs = []   # questions (also knowledge checks), results and Retry are tested with the questions
             found_objs += len(objs)
+            if n_found > self.max_buttons and objs:   # never silent: say how many were left out
+                self.capped[sid] = (self.max_buttons, n_found)
+                self.col.add("buttons", "warning", f"Only {self.max_buttons} of {n_found} clickable items on this screen were tested",
+                             slide_id=sid, slide_label=self.label(sid), found_in="Buttons",
+                             detail="The screen has more clickable items than the tester opens on one screen.",
+                             fix="Check the remaining clickable items on this screen by hand.")
             self.log(f"Buttons: {self.label(sid)} – {len(objs)} clickable objects")
             items = []
             for k, o in enumerate(objs):

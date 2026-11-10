@@ -29,7 +29,7 @@ class Run:
             self.custom = set(opts.get("checks") or CUSTOM_KEYS)
             c = self.custom
             opts.update(swipe="swipe" in c, transcript="transcript" in c, buttons="buttons" in c,
-                        menu="navigation" in c, prev="navigation" in c, assessment="assessment" in c)
+                        menu="navigation" in c, prev="navigation" in c, resume="navigation" in c, assessment="assessment" in c)
         self.col = Collector()
         # work handed to the Claude session that runs this engine (LANGUAGE_MODE=export)
         self.shot_boxes = {}
@@ -198,13 +198,13 @@ class Run:
         opts = self.meta.get("options", {})
         stage = opts.get("stage", "beta")
         gold = stage == "gold"
-        passes = [p for p in ("desktop", "restrict", "prev", "menu", "buttons", "assessment", "mobile") if opts.get(p, True)]
+        passes = [p for p in ("desktop", "restrict", "prev", "resume", "menu", "buttons", "assessment", "mobile") if opts.get(p, True)]
         wants_restrict = stage in ("beta", "gold", "custom") and any(v in ("restricted", "free") for v in (opts.get("expect") or {}).values()) \
             and (self.custom is None or "restrictions" in self.custom)
         if not wants_restrict:
             passes.remove("restrict")
         if gold:   # Gold / Showstopper: functionality only (navigation, the assessment, restrictions as per SOW)
-            passes = ["desktop", "prev", "assessment"] + (["restrict"] if wants_restrict else [])
+            passes = ["desktop", "prev", "resume", "assessment"] + (["restrict"] if wants_restrict else [])
         localized = stage in ("localized", "hindi")   # Localize: a translated course mapped against its translated SB
         if localized:
             passes = ["desktop", "prev", "menu"] + (["buttons"] if opts.get("buttons") else [])
@@ -441,7 +441,7 @@ class Run:
             menu_f = [f for f in fs if f.check == "menu"]
             click_f = [f for f in fs if f.check in ("buttons", "interactivity")]
             after_stop = stop_at is not None and k > stop_at
-            no_nav = is_welcome(s) or s.id in crawler.quiz_ids or s.id in crawler.results_ids
+            no_nav = is_welcome(s) or crawler.no_nav_expected(s)   # a knowledge check that is not graded keeps its Back
             nt = "Not tested (testing stopped)" if after_stop else "Not tested"
 
             def res(found, ran, na=False):
@@ -489,8 +489,10 @@ class Run:
                    "notes": "; ".join(dict.fromkeys(plain(f.message)[0] for f in fs))[:600] + (("; " if fs else "") + v["note"] if v.get("note") else "")}
             if is_welcome(s):
                 row["notes"] = (row["notes"] + "; " if row["notes"] else "") + "Welcome screen: no Back/Next expected (START moves on)"
-            if (s.id in crawler.quiz_ids or s.id in crawler.results_ids) and not after_stop:
-                # the assessment has no Next / Previous (it moves on as questions are answered); results need no menu
+            if s.id in crawler.back_off and not back_f and not after_stop and row["back"] in ("Pass", "Not tested"):
+                row["back"] = "N/A (Back switched off on this screen)"
+            if (s.id in crawler.quiz_ids or s.id in crawler.results_ids) and not after_stop and crawler.no_nav_expected(s):
+                # a graded assessment has no Next / Previous (it moves on as questions are answered); results need no menu
                 for k_ in ("next", "back", "swipe_next", "swipe_back"):
                     row[k_] = "N/A (assessment)"
                 if next_f:   # the feedback's own Continue / Try again does nothing: the learner cannot move on
@@ -498,13 +500,79 @@ class Run:
                 if s.id in crawler.results_ids:
                     row["menu"] = "N/A (not needed)"
                 row["notes"] = (row["notes"] + "; " if row["notes"] else "") + "Assessment screen: no Back/Next expected"
+            elif s.id in crawler.quiz_ids and not after_stop:
+                kc = crawler.kc_nav.get(s.id) or {}
+                if kc.get("next_after") is False:
+                    row["next"] = "Fail – Next stays locked after the right answer"
+                row["notes"] = (row["notes"] + "; " if row["notes"] else "") + "Knowledge check: answered like a learner, then Continue / Next"
+                for k_ in ("swipe_next", "swipe_back"):
+                    if str(row[k_]).startswith("Not tested"):
+                        row[k_] = "Not tested (question screens are answered on the phone, not swiped)"
             vals = [row["next"], row["back"], row["menu"], row["clicks"], row["swipe_next"], row["swipe_back"]]
             row["result"] = ("Not tested" if after_stop else "Fail" if any(str(x).startswith("Fail") for x in vals)
                              else "Pass")
             if crawler.blocked and crawler.blocked["sid"] == s.id:
                 row["result"] = "Fail – testing stopped here"
             rows.append(row)
-        return {"nav_table": rows, "assessment": crawler.assessment, "blocked": crawler.blocked, "passes": list(passes)}
+        return {"nav_table": rows, "nav_checklist": self.nav_checklist(rows, crawler, passes),
+                "assessment": crawler.assessment, "blocked": crawler.blocked, "passes": list(passes)}
+
+    def nav_checklist(self, rows, crawler, passes):
+        """The fixed navigation checklist of this release: every item gets a result and, when it is not Pass, the
+        reason – nothing is left out silently."""
+        F = [f for f in self.col.findings if f.severity in ("error", "warning") and not f.mobile]
+        def has(check, pat):
+            return [f for f in F if f.check in check and re.search(pat, f.message, re.I)]
+        def col(key):
+            vals = [str(r[key]) for r in rows]
+            if any(v.startswith("Fail") for v in vals):
+                return "Fail", f"{sum(v.startswith('Fail') for v in vals)} screen(s) – see the Navigation Test table"
+            if any(v.startswith("Not tested") for v in vals):
+                return "Partly tested", f"{sum(v.startswith('Not tested') for v in vals)} screen(s) not tested – see the table"
+            if not any(v.startswith("Pass") for v in vals):
+                return "N/A", "; ".join(sorted({v for v in vals}))[:200]
+            return "Pass", ""
+        def from_f(found, ran, why_not):
+            if found:
+                return "Fail", f"{len(found)} issue(s): " + "; ".join(dict.fromkeys(f.message for f in found))[:200]
+            return ("Pass", "") if ran else ("Not tested", why_not)
+        stopped = f"testing stopped at {crawler.label(crawler.blocked['sid'])}" if crawler.blocked else ""
+        items = []
+        items.append(("Next on every screen (player Next, the screen's own arrows, START)",) + col("next"))
+        items.append(("Back on every screen",) + (col("back") if "prev" in passes else ("Not tested", "Not in this stage")))
+        items.append(("Course menu: found, every item opens its screen",) + (col("menu") if "menu" in passes else ("Not tested", "Not in this stage")))
+        if "buttons" in passes:
+            r = col("clicks")
+            if crawler.capped:
+                r = ("Partly tested", f"{len(crawler.capped)} screen(s) have more clickable items than are tested; see the issues")
+            items.append(("Every clickable item opens and closes; pop-ups close",) + r)
+            items.append(("Next opens only after every clickable item is opened",) +
+                         from_f(has(("interactivity", "navigation"), r"before all clickable|stays disabled after all|stays locked after every"), True, ""))
+            items.append(("Player and title-bar buttons (Menu, Resources, Help, Glossary, Volume, Captions, Exit)",) +
+                         from_f(has(("buttons",), r"^Player button|button not working \(on every screen"), True, ""))
+        else:
+            for t in ("Every clickable item opens and closes; pop-ups close", "Next opens only after every clickable item is opened",
+                      "Player and title-bar buttons (Menu, Resources, Help, Glossary, Volume, Captions, Exit)"):
+                items.append((t, "Not tested", "Not in this stage (clickables not selected)"))
+        kc = [x for x in crawler.quiz_ids]
+        if kc:
+            items.append(("Knowledge-check feedback buttons (Continue, Try again, OK, Close) work",) +
+                         from_f(has(("navigation",), r"on the feedback does nothing"), bool(crawler.assessment) or bool(crawler.kc_nav),
+                                stopped or "The questions were not reached"))
+            items.append(("Knowledge check: Next stays locked until answered and opens after the right answer",) +
+                         from_f(has(("navigation",), r"before the question is answered|stays locked after the question"),
+                                bool(crawler.kc_nav), stopped or "The questions were not answered in the walk-through"))
+        else:
+            items.append(("Knowledge-check feedback buttons and Next after answering", "N/A", "No question screens in this course"))
+        res = getattr(crawler, "resume", None) or {}
+        if "resume" in passes:
+            items.append(("Resume: the course comes back to the screen where the learner left",
+                          res.get("result") or ("Not tested" if not stopped else "Not tested"), res.get("note") or stopped))
+        else:
+            items.append(("Resume: the course comes back to the screen where the learner left", "Not tested", "Not in this stage"))
+        if "mobile" in passes:
+            items.append(("Phone: swipe to the next and previous screen",) + col("swipe_next"))
+        return [{"item": t, "result": r, "note": n} for t, r, n in items]
 
     def slide_list(self, course, visits, crawler):
         slides = []

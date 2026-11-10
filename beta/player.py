@@ -53,6 +53,7 @@ INIT_SCRIPT = r"""
   const lms = window.__betaLms = { calls: [], store: {}, version: '' };
   const rec = (v, fn, k, val) => { lms.version = lms.version || v; lms.calls.push({ t: Date.now(), fn, k: k || '', v: val === undefined ? '' : String(val).slice(0, 300) }); };
   const st = lms.store;
+  try { Object.assign(st, window.__betaSeed || {}); } catch (e) {}   // a learner coming back (resume test)
   const api12 = {
     LMSInitialize: () => { rec('SCORM 1.2', 'Initialize'); return 'true'; },
     LMSFinish: () => { rec('SCORM 1.2', 'Finish'); return 'true'; },

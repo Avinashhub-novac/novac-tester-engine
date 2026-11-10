@@ -547,9 +547,30 @@ def _nav_sheet(wb, res, run_dir):
     names = ["Screen No", "Screen title", "Screenshot", "Next Working Status", "Previous Working Status",
              "Mobile Swipe Next Status", "Mobile Swipe Previous Status", "Menu", "Clickable"]
     widths = [10, 26, 47, 18, 18, 20, 20, 16, 26]
-    _header(ws, 5, names, widths)
+    top = 5
+    checklist = res.get("nav_checklist") or []
+    if checklist:   # the fixed navigation checklist: every item with its result (never left out silently)
+        ws.cell(top, 1, "Navigation checklist").font = Font(bold=True, size=13)
+        _header(ws, top + 1, ["Sl.no", "What was checked", "", "Result", "Reason / where"], widths[:5])
+        for i, it in enumerate(checklist, 1):
+            rr = top + 1 + i
+            ws.cell(rr, 1, i)
+            ws.cell(rr, 2, it["item"])
+            ws.merge_cells(start_row=rr, start_column=2, end_row=rr, end_column=3)
+            c = ws.cell(rr, 4, it["result"])
+            _result_cell(c)
+            ws.cell(rr, 5, it.get("note") or "")
+            ws.merge_cells(start_row=rr, start_column=5, end_row=rr, end_column=9)
+            for j in range(1, 10):
+                cc = ws.cell(rr, j)
+                cc.alignment = Alignment(wrap_text=True, vertical="top")
+                cc.border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
+            ws.row_dimensions[rr].height = 32
+        top = top + len(checklist) + 3
+        ws.cell(top - 1, 1, "Every screen").font = Font(bold=True, size=13)
+    _header(ws, top, names, widths)
     slides = {s["id"]: s for s in res.get("slides", [])}
-    r = 6
+    r = top + 1
     for row in rows:
         vals = [row["index"], row["title"], "", row["next"], row["back"], row.get("swipe_next", "—"),
                 row.get("swipe_back", "—"), row["menu"], row["clicks"]]
@@ -565,7 +586,7 @@ def _nav_sheet(wb, res, run_dir):
             img_h = _put_img(ws, th, r, 3, 330)
         ws.row_dimensions[r].height = max(40, (img_h + 10) * 0.75)
         r += 1
-    ws.freeze_panes = "A6"
+    ws.freeze_panes = f"A{top + 1}" if not checklist else None
 
 
 def _assessment_sheet(wb, res, run_dir):

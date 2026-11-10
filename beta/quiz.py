@@ -157,6 +157,7 @@ class QuizMixin:
 
     def submit_answer(self, page):
         """Presses Submit and reads the feedback. Returns 'Correct', 'Incorrect', 'Answer required' or 'No feedback'."""
+        self._fb_set("")
         before = self._screen_text(page)
         sub = self._submit_box(page)
         if sub:
@@ -169,13 +170,10 @@ class QuizMixin:
         if not new.strip():   # nothing new on screen: Submit did nothing (the question's own words, e.g.
             return "No feedback", ""   # "Select the correct option", are not feedback)
         txt = new
-        if MUST_ANSWER_RE.search(txt):
-            return "Answer required", txt[:200]
-        if INCORRECT_RE.search(txt):
-            return "Incorrect", txt[:200]
-        if CORRECT_RE.search(txt):
-            return "Correct", txt[:200]
-        return "No feedback", txt[:200]
+        fb = ("Answer required" if MUST_ANSWER_RE.search(txt) else "Incorrect" if INCORRECT_RE.search(txt)
+              else "Correct" if CORRECT_RE.search(txt) else "No feedback")
+        self._fb_set(fb)
+        return fb, txt[:200]
 
     def _same_screen(self, page, before_png, before_text):
         """Nothing changed on screen: the same words and (almost) the same picture."""
@@ -244,6 +242,23 @@ class QuizMixin:
                 self._dead_feedback_button(page, sid, name)
         if not move_on:
             return here
+        if here == sid and st["nextExists"] and st["nextDisabled"] and self._fb_last() == "Correct":
+            # answered right and the feedback is closed: the way on must open (after a wrong answer a locked Next
+            # can be the design – the learner tries again)
+            page.wait_for_timeout(1500)
+            st = self.state(page)
+            here = self.identify(st)
+            if here == sid and st["nextExists"] and st["nextDisabled"] and sid not in self.kc_locked:
+                self.kc_locked.add(sid)
+                self.kc_nav.setdefault(sid, {})["next_after"] = False
+                self.col.add("navigation", "error", "Next stays locked after the question is answered", slide_id=sid,
+                             slide_label=self.label(sid), screenshot=self.shot(page, f"{sid}_kc_locked"), box=st.get("nextBox"),
+                             vw=1366, found_in="Navigation",
+                             detail=f"Answered {self.label(sid)} and closed the feedback.\nExpected: Next opens so the learner can go on.\n"
+                                    "Result: Next stays locked – the learner is stuck on the question.",
+                             fix="Unlock Next once the question is answered (or move on when the feedback closes).")
+        elif here != sid or st["nextExists"]:
+            self.kc_nav.setdefault(sid, {}).setdefault("next_after", True)
         if here == sid and st["nextExists"] and not st["nextDisabled"]:
             self.click_first(page, SEL["next"])
             here = self.identify(self.settle(page))
@@ -335,9 +350,35 @@ class QuizMixin:
             page.wait_for_timeout(1500)
         else:
             return None
+        if slide and slide.choices:   # answer it right, like a learner who wants to go on (the course data gives the key)
+            k = next((k for k, c in enumerate(slide.choices) if c.get("correct")), None)
+            if k is not None:
+                j, _ = self._dom_index(page, slide, k)
+                i = j if j is not None else i
+        st0 = self.state(page)
+        open_before = bool(st0.get("nextExists") and not st0.get("nextDisabled"))
+        self.kc_nav.setdefault(sid, {})["next_before"] = open_before if st0.get("nextExists") else None
+        if open_before and not self._graded():
+            self.col.add("navigation", "warning", "Next is open before the question is answered", slide_id=sid,
+                         slide_label=self.label(sid), screenshot=self.shot(page, f"{sid}_kc_open"), box=st0.get("nextBox"),
+                         vw=1366, found_in="Navigation",
+                         detail="The learner can press Next and skip the question without answering it.",
+                         fix="Keep Next locked until the learner has answered the question.")
         self.select_option(page, i)
         self.submit_answer(page)
         return self.leave_feedback(page, sid)
+
+    def _fb_set(self, fb):   # per browser lane: the walk and the assessment run side by side
+        import threading
+        if not hasattr(self, "_tl"):
+            self._tl = threading.local()
+        self._tl.last_fb = fb
+
+    def _fb_last(self):
+        return getattr(getattr(self, "_tl", None), "last_fb", "")
+
+    def _graded(self):
+        return any(x.get("type") not in (None, "view") for x in (self.course.scorings or []))
 
     # ---------------------------------------------------------------- the pass
     def fresh(self, page):

@@ -16,16 +16,16 @@ from pathlib import Path
 # lane run one after another. Wave 2 needs what the walk-through (wave 1) found.
 WAVES = (
     ("checks1", (("desktop", "restrict", "prev"), ("mobile", "assessment"))),
-    ("checks2", (("buttons",), ("menu",))),
+    ("checks2", (("buttons",), ("menu", "resume"))),
 )
 # order in which each pass's findings are added to the report (fixed, whatever pass finishes first)
-REPORT_ORDER = ("desktop", "restrict", "prev", "menu", "buttons", "assessment", "mobile")
+REPORT_ORDER = ("desktop", "restrict", "prev", "resume", "menu", "buttons", "assessment", "mobile")
 
 LABELS = {
     "checks1": "Playing every screen, testing the assessment and the phone view",
     "checks2": "Opening every clickable and checking the menu",
     "prepare": "Preparing", "extract": "Opening the course", "media": "Preparing videos for playback", "desktop": "Playing every screen",
-    "restrict": "Checking restrictions", "prev": "Checking Back buttons", "menu": "Checking the menu",
+    "restrict": "Checking restrictions", "prev": "Checking Back buttons", "menu": "Checking the menu", "resume": "Checking resume",
     "buttons": "Opening and closing every clickable", "assessment": "Testing the assessment", "mobile": "Testing on mobile", "analyse": "Collecting results",
     "video": "Checking the video", "review": "Reviewing text and storyboard", "report": "Making screenshots and report",
     "upload": "Saving the report to the site", "sb": "Reviewing the storyboard",
@@ -47,6 +47,7 @@ def plan_scorm(slides, passes, play_full, has_sb, transcript, media_s=0.0):
         "restrict": 15 + min(8, n) * 4,
         "prev": n * 2.5 + 5,
         "menu": n * 3 + 5,
+        "resume": n * 1.5 + 30,
         "buttons": n * 9 + 10,
         "assessment": sum(1 for s in slides if s.is_quiz) * 45 + 90,
         "mobile": (play * 0.8 if play_full else n * 2) + n * 7 + 10,

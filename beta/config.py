@@ -16,7 +16,7 @@ PORT = _int("PORT", 8080)
 WORKERS = _int("WORKERS", 1)
 MAX_UPLOAD_MB = _int("MAX_UPLOAD_MB", 2048)
 MAX_CRAWL_MINUTES = _int("MAX_CRAWL_MINUTES", 120)
-MAX_BUTTONS_PER_SLIDE = _int("MAX_BUTTONS_PER_SLIDE", 25)
+MAX_BUTTONS_PER_SLIDE = _int("MAX_BUTTONS_PER_SLIDE", 60)
 
 # Claude (grammar, spelling, caption review)
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
