@@ -543,6 +543,11 @@ class Run:
         items.append(("Course menu: found, every item opens its screen",) + (col("menu") if "menu" in passes else ("Not tested", "Not in this stage")))
         if "buttons" in passes:
             r = col("clicks")
+            qrows = [x for x in rows if x["sid"] in crawler.quiz_ids or x["sid"] in crawler.results_ids]
+            if r[0] == "Partly tested" and all(str(x["clicks"]).startswith("Not tested") is False for x in rows if x not in qrows):
+                r = ("Pass" if "assessment" in passes else "Partly tested",
+                     "" if "assessment" in passes else f"{len(qrows)} question / result screen(s): their buttons are tested by the "
+                                                         "Assessment check, which was not selected")
             if crawler.capped:
                 r = ("Partly tested", f"{len(crawler.capped)} screen(s) have more clickable items than are tested; see the issues")
             items.append(("Every clickable item opens and closes; pop-ups close",) + r)
