@@ -4,6 +4,7 @@ Claude reads text, not sound, so narration is converted to text here first
 (faster-whisper locally, or any OpenAI-compatible transcription endpoint).
 """
 import json
+import shutil
 import re
 import subprocess
 from pathlib import Path
@@ -335,3 +336,78 @@ def make_playable(root: Path, log=print, todo=None, tick=None):
 def media_ts(sec):
     sec = int(round(sec or 0))
     return f"{sec // 60}:{sec % 60:02d} min"
+
+
+# ------------------------------------------------------------- scenes and on-screen text of a video
+def scene_times(path, dur, max_n=80, gap=2.0, fill=20.0, every=None):
+    """One moment per scene: where the picture changes (plus one every `fill` seconds through long still stretches),
+    taken a little after the change so animated text has settled."""
+    code, _, err = run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(path), "-an",
+                        "-vf", "select='gt(scene,0.22)',showinfo", "-f", "null", "-"], 3600)
+    cuts = sorted(float(x) for x in re.findall(r"pts_time:([\d.]+)", err))
+    if every:   # text can change on the same background (no picture cut): look every few seconds as well
+        marks = sorted(set([0.0] + [c for c in cuts if c > 0.5] + [k * every for k in range(1, int(dur // every) + 1)]))
+        return [min(m + (1.5 if m in cuts else 0.5), max(0.0, dur - 0.3)) for m in marks][:max_n]
+    marks = [0.0] + [c for c in cuts if c > 0.5]
+    out, last = [], -1e9
+    for i, m in enumerate(marks):
+        nxt = marks[i + 1] if i + 1 < len(marks) else dur
+        t = min(m + 1.5, (m + nxt) / 2, max(0.0, dur - 0.3))
+        if t - last >= gap:
+            out.append(t)
+            last = t
+        k = t + fill
+        while k < nxt - 2:   # a long stretch without a cut: text may still change (builds, callouts)
+            out.append(k)
+            last = k
+            k += fill
+    if len(out) > max_n:   # keep the spread over the whole video
+        step = len(out) / max_n
+        out = [out[int(i * step)] for i in range(max_n)]
+    return out
+
+
+def ocr_available():
+    return shutil.which("tesseract") is not None
+
+
+def ocr_version():
+    if not ocr_available():
+        return ""
+    _, out, err = run(["tesseract", "--version"], 30)
+    m = re.search(r"tesseract\s+v?([\d.]+)", (out or "") + (err or ""))
+    return m.group(1) if m else ""
+
+
+def frame_text(img, lang="eng"):
+    """The text in a picture, with each word's box: {"text", "nodes": [{t, b}], "words": [{w, n, b}]} (picture pixels).
+    Lines that are mostly not letters (icons, noise read as text) are dropped."""
+    code, out, _ = run(["tesseract", str(img), "stdout", "-l", lang, "--psm", "11", "tsv"], 120)
+    if code != 0:
+        return {"text": "", "nodes": [], "words": []}
+    rows = [r.split("\t") for r in out.splitlines()[1:]]
+    lines = {}
+    for r in rows:
+        if len(r) < 12 or not r[11].strip():
+            continue
+        try:
+            conf = float(r[10])
+        except ValueError:
+            continue
+        if conf < 55:
+            continue
+        key = (int(r[2]), int(r[3]), int(r[4]))   # block, paragraph, line
+        lines.setdefault(key, []).append((r[11].strip(), [int(r[6]), int(r[7]), int(r[8]), int(r[9])]))
+    nodes, words, texts = [], [], []
+    for key in sorted(lines, key=lambda k: (min(b[1] for _, b in lines[k]), min(b[0] for _, b in lines[k]))):
+        ws = lines[key]
+        t = " ".join(w for w, _ in ws)
+        letters = sum(ch.isalpha() for ch in t)
+        if letters < 3 or letters < 0.6 * len(t.replace(" ", "")):
+            continue
+        x0 = min(b[0] for _, b in ws); y0 = min(b[1] for _, b in ws)
+        x1 = max(b[0] + b[2] for _, b in ws); y1 = max(b[1] + b[3] for _, b in ws)
+        nodes.append({"t": t, "b": [x0, y0, x1 - x0, y1 - y0]})
+        words += [{"w": w, "n": len(nodes) - 1, "b": b} for w, b in ws]
+        texts.append(t)
+    return {"text": "\n".join(texts), "nodes": nodes, "words": words}

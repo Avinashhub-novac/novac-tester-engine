@@ -861,6 +861,37 @@ class Run:
         else:
             self.col.add("video", "error", "The file has no video stream")
 
+        # scenes: one picture per scene with the on-screen text read from it (Alpha / Custom), so the video's own
+        # text is proofread, mapped with the SB and reviewed scene by scene like the screens of a course
+        opts = self.meta.get("options", {})
+        scenes = []
+        if media.has_stream(info, "video") and (opts.get("stage") == "alpha" or self.custom is not None):
+            ocr = media.ocr_available()
+            self.log("Finding the scenes and reading their on-screen text" if ocr else "Finding the scenes")
+            times = media.scene_times(path, dur or 0, max_n=400, every=3.0) if ocr else media.scene_times(path, dur or 0)
+            prev = None
+            for i, t in enumerate(times):
+                rel = frame(t, f"scene{i:03d}")
+                if not rel:
+                    continue
+                ft = media.frame_text(self.dir / rel) if ocr else {"text": "", "nodes": [], "words": []}
+                norm = re.sub(r"\W+", " ", ft["text"]).strip().lower()
+                if ocr and (norm == prev or (not norm and scenes and not scenes[-1]["text"])):
+                    (self.dir / rel).unlink(missing_ok=True)
+                    continue   # the same screen while only the picture moves (or still no text)
+                prev = norm
+                self.shot_boxes[rel] = {"nodes": ft["nodes"], "words": ft["words"]}
+                scenes.append({"t": t, "text": ft["text"], "shot": rel})
+            if len(scenes) > 80:   # the reviewer looks at up to 80 scenes: keep the ones with text, spread out
+                keep = [x for x in scenes if x["text"].strip()] or scenes
+                step = len(keep) / 80
+                scenes = [keep[int(i * step)] for i in range(80)] if len(keep) > 80 else keep
+            for k, sc in enumerate(scenes):
+                end = scenes[k + 1]["t"] if k + 1 < len(scenes) else dur
+                sc.update(id=f"s{k}", time=media.ts(sc["t"]), label=f"Scene {k + 1} ({media.ts(sc['t'])}–{media.ts(end)})", end=end)
+            self.log(f"{len(scenes)} scenes" + ("" if ocr else " (on-screen text is read from the pictures by the reviewer)"))
+            self.meta.setdefault("tools_used", {})["ocr"] = f"tesseract {media.ocr_version()}" if ocr else "none"
+
         # captions
         cap_file = self.dir / self.meta["captions"] if self.meta.get("captions") else None
         if not cap_file:
@@ -872,8 +903,9 @@ class Run:
                 self.col.skip(c, "Transcript check turned off for this Alpha review")
         elif not cues:
             self.col.add("transcript", "warning", "No captions found (upload an .srt/.vtt or embed subtitles)")
-            for c in ("grammar", "spelling"):
-                self.col.skip(c, "No captions to check")
+            if not any(sc["text"].strip() for sc in scenes):   # the scenes' on-screen text is still proofread
+                for c in ("grammar", "spelling"):
+                    self.col.skip(c, "No captions or on-screen text to check")
         else:
             self.log(f"{len(cues)} caption cues")
             from .progress import plan_video
@@ -906,8 +938,9 @@ class Run:
             self.proofread(items, lambda it: it.get("slide", ""))
             if self.meta.get("options", {}).get("stage") in ("localized", "hindi"):
                 self.localize_task()
-            self.storyboard_task([{"id": it["id"], "label": it["slide"], "time": it["time"], "captions": it["text"],
-                                   "shot": it["shot"]} for it in items])
+            if not scenes:
+                self.storyboard_task([{"id": it["id"], "label": it["slide"], "time": it["time"], "captions": it["text"],
+                                       "shot": it["shot"]} for it in items])
             if cue_end := cues[-1][1]:
                 if cue_end > dur + 1:
                     self.col.add("transcript", "error", "Captions run past the end of the video",
@@ -945,7 +978,32 @@ class Run:
                             self.col.add("transcript", "error", "Narration has no caption", time=media.ts(s0),
                                          slide_label=f"{media.ts(s0)}–{media.ts(s1)}", detail=t)
                     self.report_transcripts(pending, slide_based=False)
-        if not cues:
+        if scenes:
+            def said(sc):   # the captions shown during the scene
+                return " ".join(c[2] for c in cues if c[1] > sc["t"] - 0.5 and c[0] < sc["end"])
+            ost = [{"id": f"ost{sc['id']}", "slide": sc["label"], "source": "on-screen text (read from the video picture)",
+                    "time": sc["time"], "text": sc["text"], "shot": sc["shot"]} for sc in scenes if sc["text"].strip()]
+            if ost:
+                self.proofread(ost, lambda it: it.get("slide", ""))
+            if opts.get("stage") == "alpha" or (self.custom is not None and self.custom & {"logic", "consistency", "visual"}):
+                for c in ("logic", "consistency", "visual"):
+                    self.col.ran(c)
+                self.tasks["course_title"] = Path(self.meta.get("name") or "").stem
+                if self.custom is not None:
+                    self.tasks["logic_areas"] = sorted(self.custom & {"logic", "consistency", "visual"})
+                self.tasks["logic_check"] = [{"slide_id": sc["id"], "label": sc["label"], "position": k + 1,
+                                              "title": (sc["text"].splitlines() or [""])[0], "text": sc["text"],
+                                              "transcript": said(sc), "shot": sc["shot"], "video": True}
+                                             for k, sc in enumerate(scenes)][:80]
+            self.storyboard_task([{"id": sc["id"], "label": sc["label"], "title": (sc["text"].splitlines() or [""])[0],
+                                   "time": sc["time"], "text": sc["text"], "captions": said(sc), "shot": sc["shot"],
+                                   "video_scene": True} for sc in scenes])
+            if not cues:
+                self.col.add("content", "info", "Voice-over not compared with the SB: the video has no captions",
+                             detail="The on-screen text of every scene was compared with the SB. The narration itself cannot "
+                                    "be heard by the online tester (no speech-to-text here), so the VO words were not checked.",
+                             fix="Upload the captions (.srt or .vtt) with the video to check the VO against the SB too.")
+        elif not cues:
             self.col.skip("content", "No captions to compare with the storyboard")
         # every issue needs a screenshot: a frame at its time (or the start of the video)
         for i, f in enumerate(self.col.findings):

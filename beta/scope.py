@@ -102,15 +102,27 @@ VIDEO_SCOPE = [
 ]
 
 
+ALPHA_VIDEO_SCOPE = [
+    ("Video plays; picture and sound", ["video"]),
+    ("Captions present, in time with the narration", ["transcript"]),
+    ("Spelling and grammar: captions and the on-screen text of every scene", ["spelling", "grammar"]),
+    ("Content as per the SB: on-screen text of every scene, and captions against the VO", ["content"]),
+    ("Logic, facts and flow of the scenes", ["logic"]),
+    ("Consistency: casing, punctuation, parallel lists; on-screen text fits the narration", ["consistency"]),
+    ("Pictures fit their scene; text fits and is readable", ["visual"]),
+]
+
+
 def items(stage, kind="", selected=None):
     if stage == "custom":
         its = custom_items(selected)
         if kind == "video":   # a video has no screens: only what applies to it
-            vid = {c for _, cs in VIDEO_SCOPE for c in cs}
+            vid = {c for _, cs in ALPHA_VIDEO_SCOPE for c in cs}
             its = [VIDEO_SCOPE[0]] + [(l, cs) for l, cs in its if set(cs) & vid]
         return its
     if kind == "video":
-        return LOCALIZED_VIDEO_SCOPE if stage in ("localized", "hindi") else VIDEO_SCOPE
+        return (LOCALIZED_VIDEO_SCOPE if stage in ("localized", "hindi") else ALPHA_VIDEO_SCOPE if stage == "alpha"
+                else VIDEO_SCOPE)
     return SCOPE.get(stage or "beta", SCOPE["beta"])
 
 

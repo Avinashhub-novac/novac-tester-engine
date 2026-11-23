@@ -64,7 +64,7 @@ def plan_scorm(slides, passes, play_full, has_sb, transcript, media_s=0.0):
 
 
 def plan_video(duration_s, cues, has_sb):
-    p = [("video", 30 + duration_s * 0.25 + cues * 2.5), ("analyse", 10)]
+    p = [("video", 30 + duration_s * 0.6 + cues * 2.5), ("analyse", 10)]   # picture checks + reading every scene
     p += _post(max(1, cues // 4), cues * 12, has_sb, True)
     return p
 

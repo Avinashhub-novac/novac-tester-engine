@@ -76,6 +76,10 @@ body-text sentence with no full stop). Do not report style, passive voice, Oxfor
 button text without full stops, bullet fragments, product names, acronyms, glossary words, variables like
 %Results.ScorePercent%, or US/UK spelling unless the course mixes both. In "explanation" say where the words are (on
 screen, in the title, or in the captions / transcript) exactly as the item's source says.
+VIDEO SCENES: an item whose source is "on-screen text (read from the video picture)" was read from a video frame by
+a text reader and may hold reading mistakes (l/I, rn/m, missing letters, stray symbols). Before reporting anything in
+such an item, open its "shot" with the Read tool and confirm the mistake is really in the picture; never report a
+reading mistake, and copy "original" exactly as it appears in the picture.
 Entry: {"item_id", "category": "spelling"|"grammar"|"punctuation", "severity": "error"|"warning", "original": exact
 wrong words copied from the text, "suggestion": the corrected words, "explanation": one short plain sentence}.
 
@@ -98,6 +102,11 @@ compare it with that slide's `vo` (the course's captions; captions, transcript a
 VO words that are different or missing in the course, or extra in the course. Do not report on-screen text, titles,
 layout, missing, extra or reordered screens, or anything else in the SB, and never report mistakes in the SB itself
 (never set "error_in": "sb"); "found_in" is always "Transcript" and "course_says" is copied from `vo`.
+VIDEO SCENES: when a slide has "video_scene": true, the course is a video and each slide is one scene: "text" is
+its on-screen text read from the picture (it may hold reading mistakes – open the scene's "shot" with the Read tool to
+read the real words before reporting, and copy "course_says" from the picture), "captions" is what the captions show
+during the scene ("" when the video has no captions: then compare only the on-screen text and never report the VO
+as missing). Map the SB screens to the scenes in time order.
 Otherwise report where the course is not as per the SB: on-screen text that differs or is missing, screen titles that
 differ from the SB, captions/transcript that differ from the SB voice-over script (VO), SB screens missing from the
 course, course screens not in the SB, and screens in a different order. Ignore developer/animation instructions,
@@ -116,7 +125,9 @@ page N ===" marker above it; omit if unknown), "course_says": exact course text 
 ## logic_check
 Only if tasks.logic_check is not empty (Alpha, or a Custom test: the course is reviewed screen by screen, in full). Each item is one
 screen in course order ("position"), with its title, on-screen text ("text"), narration ("transcript") and a
-screenshot ("shot", a picture file in the run folder – open it with the Read tool; at most 80 screens). Question
+screenshot ("shot", a picture file in the run folder – open it with the Read tool; at most 80 screens). For a video
+(items with "video": true) each item is one scene: its "text" was read from the picture and may hold reading
+mistakes, so take the words from the picture itself; "transcript" is the captions shown during the scene (often ""). Question
 screens also list their answer options and which one the course marks as correct ("marked_correct").
 tasks.course_title is the course's name. Go through the screens from the first to the last and check each one for the
 problems below, then check the rules that need the whole course (consistency, order, recap, assessment). Report each
