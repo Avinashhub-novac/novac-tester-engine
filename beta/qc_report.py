@@ -361,7 +361,8 @@ def build(res, meta, run_dir: Path, out_path: Path, review_date=None):
     stage = res.get("stage") or "beta"
     if res.get("nav_table"):
         _nav_sheet(wb, res, run_dir)
-    if stage in ("alpha", "beta", "gold") and not is_video and res.get("nav_table") is not None:
+    if not is_video and any("assessment" in (it.get("checks") or []) for it in res.get("scope") or []):
+        # whenever the assessment is in the scope (Custom too): its results, or why it could not be tested
         _assessment_sheet(wb, res, run_dir)
     if stage in ("beta", "gold") and not is_video:
         _completion_sheet(wb, res, run_dir)

@@ -564,6 +564,38 @@ class Crawler(QuizMixin):
             self._text_shot(page, sid, record)
         return self.state(page)
 
+    SCROLLERS_JS = """() => {
+      const out = [];
+      document.querySelectorAll('.slide-layer:not(.hidden) *').forEach(el => {
+        const r = el.getBoundingClientRect();
+        if (el.clientHeight > 40 && el.scrollHeight - el.clientHeight > 8 && r.width > 60 && r.height > 40 &&
+            getComputedStyle(el).visibility !== 'hidden') { el.dataset.betaScroll = out.length; out.push(el.scrollHeight - el.clientHeight); }
+      });
+      return out.slice(0, 3);
+    }"""
+
+    def _scroll_shots(self, page, sid, record):
+        """Text further down a scrolling box is not in the screen's picture: scroll each box a page at a time and take
+        a picture each time, so an issue in that text is shown where the learner sees it."""
+        try:
+            boxes = page.evaluate(self.SCROLLERS_JS) or []
+        except Exception:
+            return
+        for i, extra in enumerate(boxes):
+            try:
+                step = page.evaluate(f"() => document.querySelector('[data-beta-scroll=\"{i}\"]').clientHeight") * 0.85
+                y = 0
+                for _ in range(10):
+                    y = min(extra, y + step)
+                    page.evaluate(f"() => {{ document.querySelector('[data-beta-scroll=\"{i}\"]').scrollTop = {y}; }}")
+                    page.wait_for_timeout(400)
+                    self._text_shot(page, sid, record)
+                    if y >= extra:
+                        break
+                page.evaluate(f"() => {{ document.querySelector('[data-beta-scroll=\"{i}\"]').scrollTop = 0; }}")
+            except Exception:
+                continue
+
     def _text_shot(self, page, sid, record):
         shots = record.setdefault("text_shots", [])
         if len(shots) >= 25:
@@ -824,6 +856,7 @@ class Crawler(QuizMixin):
                 rec["boxes"] = page.evaluate(TEXTBOX_JS)
             except Exception:
                 rec["boxes"] = []
+            self._scroll_shots(page, sid, rec)
             self.capture_transcript(page, sid, rec)
             slide = self.course.by_id(sid)
             welcome = is_welcome(slide)

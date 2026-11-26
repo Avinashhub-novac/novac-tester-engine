@@ -30,7 +30,28 @@ KC_RE = re.compile(r"knowledge\s*check|check\s+your\s+(knowledge|understanding)|
                    r"test\s+your\s+(knowledge|understanding)|self[-\s]?check|try\s+it", re.I)
 
 
-def check_screen_numbers(seq, col, assess=(), results=(), welcome=(), partial=False, knowledge=()):
+PLAIN_NUM = re.compile(r"^\s*(0?\d{1,3})\s*$")
+
+
+def plain_numbers(boxes_by_sid, vh=768):
+    """Screen numbers shown as a bare number ("01", "04") in the same place on every screen (a title bar or footer):
+    the spot where a bare number appears on most screens is the screen-number spot; returns {sid: (n, "01")}."""
+    spots = {}
+    for sid, nodes in boxes_by_sid.items():
+        for nd in nodes or []:
+            m = PLAIN_NUM.match(nd.get("t") or "")
+            b = nd.get("b") or [0, 0, 0, 0]
+            if not m or not (b[1] < vh * 0.2 or b[1] > vh * 0.75):   # a header or footer, never the content
+                continue
+            key = (round(b[0] / 25), round(b[1] / 25))
+            spots.setdefault(key, {})[sid] = (int(m.group(1)), m.group(1))
+    if not spots:
+        return {}
+    best = max(spots.values(), key=len)
+    return best if len(best) >= max(2, len(boxes_by_sid) * 0.5) else {}
+
+
+def check_screen_numbers(seq, col, assess=(), results=(), welcome=(), partial=False, knowledge=(), plain=None):
     """seq: [(slide_id, label, text, title)] in learner order.
     Team rules: screens may repeat a number when they carry the same title (one screen built as several slides);
     the assessment's rules, questions and results share one number, and the results screen may have none;
@@ -39,8 +60,13 @@ def check_screen_numbers(seq, col, assess=(), results=(), welcome=(), partial=Fa
     seq = [x if len(x) == 4 else (*x, "") for x in seq]
     found = [(sid, lab, find_screen_number(t), title) for sid, lab, t, title in seq]
     numbered = [f for f in found if f[2]]
+    if seq and len(numbered) < max(2, len(seq) * 0.5) and plain:
+        # numbers without a total ("01", "02" in the title bar): order, repeats and gaps are still checked
+        found = [(sid, lab, (plain[sid][0], 0, plain[sid][1]) if sid in plain else None, title) for sid, lab, t, title in seq]
+        numbered = [f for f in found if f[2]]
     if not seq or len(numbered) < max(2, len(seq) * 0.5):
-        col.skip("screen_number", "Fewer than half of the slides show a 'Screen N of M' label")
+        col.skip("screen_number", "No screen number found on at least half of the screens ('Screen N of M', 'N/M' "
+                                  "or a bare number in the same place on every screen)")
         return
     col.ran("screen_number")
     assess, results, welcome = set(assess), set(results), set(welcome)
@@ -68,7 +94,7 @@ def check_screen_numbers(seq, col, assess=(), results=(), welcome=(), partial=Fa
             continue
         started = True
         a, b, raw = n
-        if b != common_total:
+        if b and b != common_total:
             col.add("screen_number", "error", f"Wrong total in screen number: '{raw}'", slide_id=sid, slide_label=lab,
                     suggestion=f"{a} of {common_total}")
         if a in first_with:
@@ -85,12 +111,13 @@ def check_screen_numbers(seq, col, assess=(), results=(), welcome=(), partial=Fa
             same_screen = a == prev
             if not same_screen and a != prev + 1:
                 col.add("screen_number", "error", f"Screen number out of order: {raw}", slide_id=sid, slide_label=lab,
-                        detail=f"Previous numbered slide showed {prev}", suggestion=f"{prev + 1} of {common_total}")
+                        detail=f"Previous numbered slide showed {prev}",
+                        suggestion=f"{prev + 1} of {common_total}" if common_total else f"{prev + 1:0{len(raw)}d}")
         elif a != 1:
             col.add("screen_number", "warning", f"First numbered slide starts at {a}, not 1", slide_id=sid, slide_label=lab)
         prev, prev_sid = a, sid
     count = len(first_with)
-    if common_total != count and not partial:
+    if common_total and common_total != count and not partial:
         col.add("screen_number", "warning",
                 f"Screen total says {common_total} but {count} slides carry a screen number on the Next path")
 

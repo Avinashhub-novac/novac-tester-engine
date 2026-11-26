@@ -680,6 +680,11 @@ def cmd_bundle(a):
         if not src_rel and slide and slide.get("shot"):
             src_rel = slide["shot"]
         needle = _needle(f)
+        if needle and sid and f.get("box"):
+            # a box from the course data is only trusted when the words really show in that picture
+            tb0 = shot_boxes.get(src_rel) or ((slide or {}).get("boxes") if src_rel == (slide or {}).get("shot") else None)
+            if not (tb0 and _find_text_box(tb0, needle)):
+                f["box"], f["_data_box"] = None, True
         if needle and sid and not f.get("box"):
             # a text issue: use the picture of this screen where the words are really visible
             cands = [src_rel, (slide or {}).get("shot", "")] + [r for r in shot_boxes if owner(r) == sid]
@@ -690,12 +695,19 @@ def cmd_bundle(a):
                     hit = c
                     break
             if hit:
+                f.pop("_data_box", None)
                 if hit != src_rel:
                     f["screenshot"] = src_rel = hit
-            elif f.get("check") in ("grammar", "spelling") and slide and slide.get("shot") and res.get("stage") != "sb" and watched:
+            elif f.get("check") in ("grammar", "spelling") and slide and slide.get("shot") and res.get("stage") != "sb" and watched \
+                    and not f.get("_data_box"):
                 # the words are only in the course files, never visible to a learner: not reported (team rule)
                 f["_hidden"] = True
                 continue
+            elif f.pop("_data_box", False):
+                # the words are on this screen in the course but were not visible in any picture taken (a scrolling
+                # box, or text shown only for a moment): never highlight an empty spot – say where to look
+                f["detail"] = ((f.get("detail") or "") + "\nNot visible in the screenshot: the words are further down a "
+                               "scrolling box or show only for a moment on this screen – check them there.").strip()
             elif f.get("check") in ("transcript",) and "not seen on screen" not in (f.get("detail") or ""):
                 f["detail"] = ((f.get("detail") or "") + "\nThis text was not seen on screen during testing: it is in a part of the screen that opens on a click (layer), or it is hidden.").strip()
         name = f"bundle/f{i:03d}.jpg"

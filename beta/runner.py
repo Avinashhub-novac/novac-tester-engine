@@ -405,7 +405,9 @@ class Run:
                                        welcome={s.id for s in course.slides if is_welcome(s) or is_end(s, n_all)},
                                        partial=bool(crawler.blocked),
                                        knowledge={s.id for s in course.slides if s.id not in crawler.assess_ids
-                                                  and (getattr(s, "is_quiz", False) or getattr(s, "choices", None))})
+                                                  and (getattr(s, "is_quiz", False) or getattr(s, "choices", None))},
+                                       plain=textcheck.plain_numbers({x[0]: ((visits.get(x[0]) or {}).get("boxes") or {}).get("nodes")
+                                                                      for x in seq}))
 
         slides = self.slide_list(course, visits, crawler)
         self.finish(slides, {"course_title": course.title, "slide_count": len(course.slides),

@@ -143,6 +143,17 @@ def apply(res, stage, kind="", selected=None):
     if dropped:
         res["out_of_scope_dropped"] = res.get("out_of_scope_dropped", 0) + dropped
     summary = res.get("summary") or {}
+    # STRICT SCOPE: what is outside the stage's scope (or the ticked checks) is not shown at all – no result, no table
+    for c in list(summary):
+        if c not in ok:
+            summary[c] = {"status": "n/a", "out_of_scope": True}
+    if res.get("checks_run"):
+        res["checks_run"] = [c for c in res["checks_run"] if c in ok]
+    if "navigation" not in ok:
+        res.pop("nav_table", None)
+        res.pop("nav_checklist", None)
+    if "assessment" not in ok and res.get("assessment"):
+        res["assessment"] = None
     out = []
     for label, checks in items(stage, kind, selected):
         st = [summary.get(c, {}).get("status", "n/a") for c in checks]
